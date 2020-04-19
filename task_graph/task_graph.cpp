@@ -1,385 +1,442 @@
 // TaskGraph.cpp : This file contains the 'main' function. Program execution begins and ends there.
 //
-
+#include <windows.h>
+#include <debugapi.h>
 #include <iostream>
 #include <thread>
 #include <type_traits>
-#include <atomic>
 #include <sstream>
 #include <assert.h>
 #include "mpmc_bounded_queue.h"
 
+
 enum class ThreadName
 {
 	DontCare,		//等于WorkThread,
-	WorkThread,
+	WorkThread,		//独立的用于执行task的线程
 	MainThread,		//现在这个没支持，这两个线程的exection可能需要维持在一定时间内，通过 fiber 让出时间片?
 	RenderThread,	//主要是提供给d3d填充资源之类的，不过现在没支持
 	DiskIOThread,	//读文件用的
 };
 
-struct TaskGraph;
-struct Task
+struct GraphTask
 {
-	virtual ~Task() = default;
-
-protected:
-	Task(TaskGraph* parent, ThreadName type)
-		: mParent(parent)
-		, mThreadName(type)
-		, mForeDependencyCount(0)
-		, finished(false)
-	{	}
-public:
-
-	TaskGraph* mParent;
-	ThreadName mThreadName;
-	std::atomic<int> mForeDependencyCount;
-	std::vector< std::atomic<int>*> mDependecies;
-	std::atomic_bool finished;
-
-	virtual void Execute() = 0;
-};
-
-struct TaskGraph
-{
-	void MakeDependency(Task* fore, Task* next)
-	{
-		//make sure fore and next are in the graph.
-		int exists = 0;
-		for (Task* task : mRemainTasks)
-		{
-			if (task == next || task == fore)
-				exists += 1;
-		}
-
-		if (exists == 2)
-		{
-			next->mForeDependencyCount.fetch_add(1);
-			fore->mDependecies.push_back(&next->mForeDependencyCount);
-		}
-	}
-
-	void Join()
-	{
-		while (!mFinished)
-		{
-
-		}
-
-		for (Task*& pTask : mRemainTasks)
-		{
-			assert(false);
-			delete pTask;
-			pTask = nullptr;
-		}
-		mRemainTasks.clear();
-	}
-
-	void Setup()
-	{
-		SetupParameter();
-		mFinished = false;
-	}
-
-	virtual void SetupParameter() = 0;
-
-protected:
-	
-	std::vector<Task*> mRemainTasks;
-private:
-	bool mFinished = false;
-
+	friend struct Task;
 	friend struct TaskScheduler;
-};
+protected:
+	static GraphTask* StartTask(ThreadName name, std::function<void()>&& routine, GraphTask** pPrerequistes = NULL, unsigned int prerequisteCount = 0)
+	{
+		GraphTask* newTask = nullptr;
+		if (!sFactoryPool.dequeue(newTask))
+		{
+			newTask = new GraphTask(name, std::move(routine));
+		}
+		else
+		{
+			newTask->mThreadName = name;
+			newTask->mRoutine = std::move(routine);
+		}
 
-template<typename ParamType>
-struct TTask : Task
-{
-	TTask(TaskGraph* parent, ThreadName type, std::function<void(ParamType*)>&& routine)
-		: Task(parent, type)
+		newTask->mAutoRecycle.store(false, std::memory_order_release);
+		newTask->mFinished.store(false, std::memory_order_release);
+		newTask->mRecycled.store(false, std::memory_order_release);
+
+		if (pPrerequistes && prerequisteCount > 0)
+		{
+			for (unsigned int i = 0; i < prerequisteCount; i += 1)
+			{
+				pPrerequistes[i]->AddSubSequent(newTask);
+			}
+		}
+		newTask->SchedulerMe();
+		return newTask;
+	}
+
+	static void FreeTask(GraphTask* pTask)
+	{
+		pTask->mRecycled.store(true, std::memory_order_release);
+		sFactoryPool.enqueue(pTask);
+	}
+
+	static void ReleaseCacheTasks()
+	{
+		GraphTask* newTask = nullptr;
+		while (sFactoryPool.dequeue(newTask))
+		{
+			delete newTask;
+		}
+	}
+
+	virtual ~GraphTask() = default;
+
+	GraphTask* ContinueWith(ThreadName name, std::function<void()>&& routine)
+	{
+		GraphTask* task = this;
+		return StartTask(name, std::move(routine), &task, 1);
+	}
+
+	void SpinJoin()
+	{
+		while (!mFinished.load(std::memory_order_acquire))
+		{
+
+		}
+	}
+
+
+protected://internal used.
+	void Execute()
+	{
+		mRoutine();
+		Notify();
+		mFinished.store(true, std::memory_order_relaxed);
+		if (mAutoRecycle.load(std::memory_order_acquire))
+		{
+			GraphTask::FreeTask(this);
+		}
+		
+	}
+
+	void AutoRecycle()
+	{
+		if (mFinished.load(std::memory_order_acquire))
+		{
+			GraphTask::FreeTask(this);
+		}
+		else
+		{
+			//pending to finish the task.
+			mAutoRecycle.store(true,std::memory_order_release);
+		}
+	}
+
+	bool IsReady() const { return mForeDependencyCount.load(std::memory_order_acquire) == 0; }
+
+	ThreadName DesireExecutionOn() const { return mThreadName; }
+
+protected:
+	GraphTask(ThreadName name, std::function<void()>&& routine)
+		:  mThreadName(name)
 		, mRoutine(routine)
 	{
 
 	}
 
-	ParamType* mParameter = nullptr;
-	std::function<void(ParamType*)> mRoutine;
+	unsigned int ForeDependencyCount() const { return mForeDependencyCount; }
 
-	virtual void Execute() override
+	void Notify()
 	{
-		mRoutine(mParameter);
-		for (auto* e : mDependecies)
+		std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
+		for (size_t id = 0; id < mSubsequents.size(); id += 1)
 		{
-			e->fetch_sub(1);
-		}
-		mDependecies.clear();
-		finished = true;
-	}
-};
-
-template<typename ParamType>
-struct TTaskGraph : TaskGraph
-{
-
-	ParamType* mParameter = nullptr;
-	void SetParameter(ParamType* param)
-	{
-		mParameter = param;
-	}
-
-	TTask<ParamType>* CreateTask(ThreadName type, std::function<void(ParamType*)> routine)
-	{
-		TTask<ParamType>* pTask = new TTask<ParamType>(this, type, std::move(routine));
-		mRemainTasks.push_back(pTask);
-		return pTask;
-	}
-
-	virtual void SetupParameter() override
-	{
-		for (Task* pTask : mRemainTasks)
-		{
-			((TTask<ParamType>*)pTask)->mParameter = mParameter;
+			GraphTask* task = mSubsequents[id];
+			task->mForeDependencyCount.fetch_sub(1);
+			task->SchedulerMe();
 		}
 	}
+
+	bool AddSubSequent(GraphTask* pNextTask)
+	{
+
+		//make sure fore and next are in the same graph.
+		//and make no cycles in the graph if we establish a dependence.
+		if (!mFinished.load(std::memory_order_acquire))
+		{
+			std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
+			if (!pNextTask->RecursiveSearchSubSequents(this))
+			{
+				mSubsequents.push_back(pNextTask);
+				pNextTask->mForeDependencyCount.fetch_add(1);
+				return true;
+			}
+		}
+		return false;
+	}
+
+private:
+	void SchedulerMe();
+
+	bool IsSubSequentTask(GraphTask* pTask) const
+	{
+		return std::find(mSubsequents.begin(), mSubsequents.end(), pTask) != mSubsequents.end();
+	}
+
+	bool RecursiveSearchSubSequents(GraphTask* pTask) const
+	{
+		if (IsSubSequentTask(pTask))
+		{
+			return true;
+		}
+		else
+		{
+			for (GraphTask* pTask : mSubsequents)
+			{
+				if (pTask->IsSubSequentTask(pTask))
+					return true;
+			}
+
+			return false;
+		}
+	}
+
+
+	static mpmc_bounded_queue<GraphTask*> sFactoryPool;
+
+	ThreadName mThreadName = ThreadName::WorkThread;
+	std::atomic<bool> mAutoRecycle = false;
+	std::atomic<bool> mFinished = false;
+	std::atomic<bool> mRecycled = false;
+	std::atomic<int> mForeDependencyCount = 0;
+	std::mutex mSubseuquentsMutex;
+	std::vector<GraphTask*> mSubsequents;
+	std::function<void()> mRoutine;
 };
 
+
+const int kMaxTaskCount = 4096;
+mpmc_bounded_queue<GraphTask*> GraphTask::sFactoryPool(kMaxTaskCount);
 
 struct TaskScheduler
 {
-	static const int kTaskExectionJob = 3;
+	static TaskScheduler& Instance()
+	{
+		static TaskScheduler instance;
+		return instance;
+	}
 
-	bool threadRunning = true;
+	static void Shutdown()
+	{
+		Instance().schedulerRunning.store(false, std::memory_order_release);
+		Instance().Join();
+		GraphTask::ReleaseCacheTasks();
+	}
 
-	std::thread scheduleThread;
-	locked_queue<TaskGraph*> runningGraphs;
+public://internal use.
+	void ScheduleTask(GraphTask* task)
+	{
+		if (task->DesireExecutionOn() == ThreadName::DiskIOThread)
+		{
+			diskIOThreadTaskQueue.enqueue(task);
+		}
+		else
+		{
+			workThreadTaskQueue.enqueue(task);
+		}
+	}
 
-	std::thread HDDIOWorkingThread;
-	locked_queue<Task*> DiskIOTaskQueue;
+private:
+	static const int kNumWorThread = 3;
+	std::atomic_bool schedulerRunning = true;
 
-	std::thread generalWorkingThreads[kTaskExectionJob];
-	locked_queue<Task*> generalTaskQueues[kTaskExectionJob];
+	std::thread diskIOThread;
+	std::thread workThreads[kNumWorThread];
 
+	mpmc_bounded_queue<GraphTask*> diskIOThreadTaskQueue;
+	mpmc_bounded_queue<GraphTask*> workThreadTaskQueue;
 
 	TaskScheduler()
+		: diskIOThreadTaskQueue(1024)
+		, workThreadTaskQueue(2048)
 	{
-		scheduleThread = std::thread(&TaskScheduler::TaskScheduleRoutine, this);
-		HDDIOWorkingThread = std::thread(&TaskScheduler::WorkThreadRoute, this, &DiskIOTaskQueue);
-		for (size_t i = 0; i < kTaskExectionJob; i += 1)
+		for (size_t i = 0; i < kNumWorThread; i += 1)
 		{
-			std::thread& t = generalWorkingThreads[i];
-			locked_queue<Task*>& q = generalTaskQueues[i];
-			t = std::thread(&TaskScheduler::WorkThreadRoute, this, &q);
+			workThreads[i] = std::thread(&TaskScheduler::TaskThreadRoute, this, &workThreadTaskQueue);
 		}
+		diskIOThread = std::thread(&TaskScheduler::TaskThreadRoute, this, &diskIOThreadTaskQueue);
 	}
 
-
-
-	void StartSchedule(TaskGraph& pGraph)
+	void TaskThreadRoute(mpmc_bounded_queue<GraphTask*>* queue)
 	{
-		pGraph.Setup();
-		runningGraphs.push_back(&pGraph);
-	}
-
-	void TaskScheduleRoutine()
-	{
-		while (threadRunning || runningGraphs.size() > 0)
+		GraphTask* task = nullptr;
+		bool fetchedTask = (fetchedTask = queue->dequeue(task));
+		while (schedulerRunning.load(std::memory_order_acquire) || fetchedTask)
 		{
-			if (runningGraphs.size() > 0)
+			if (fetchedTask)
 			{
-				std::vector<TaskGraph*> tempGraphs;
-				runningGraphs.exchange(tempGraphs);
-
-
-				//printf("scedule graph : %d\n", tempGraphs.size());
-				for (TaskGraph* pGraph : tempGraphs)
-				{
-					UpdateGraph(pGraph);
-					if (!pGraph->mFinished)
-					{
-						//有锁的可能会有性能问题。
-						//不能再最后简单点swap，因为有可能这个过程中有新加入的 graph
-						//但是可以在最后统一push，考虑到后期会改成无锁的，就不再做提前改进了。
-
-						runningGraphs.push_back(pGraph);
-					}
-					
-					//push的时候+1了，多清理一次
-					//和完成的一样清掉
-					runningGraphs.DecreaseCount();
-				}
-			}
-			//这个循环可以不用一直循环
-			//通过event通知/挂起会节省很多空循环
-			//但是不影响功能就先不管了
-		}
-		//printf("schedule thread quit.\n");
-	}
-
-
-	void UpdateGraph(TaskGraph* pGraph)
-	{
-		if (pGraph->mRemainTasks.size() == 0)
-		{
-			pGraph->mFinished = true;
-		}
-		else
-		{
-			//dispatch tasks.
-			std::vector<Task*> unpreparedTasks;
-			for (Task* pTask : pGraph->mRemainTasks)
-			{
-				if (pTask->mForeDependencyCount == 0)
-				{
-					//现在有三个thread，所以暂时按照平均分一下。
-					ScheduleTask(pTask);
-				}
-				else
-				{
-					unpreparedTasks.push_back(pTask);
-				}
-			}
-			pGraph->mRemainTasks.swap(unpreparedTasks);
-		}
-	}
-	void ScheduleTask(Task* pTask)
-	{
-		if (pTask->mThreadName == ThreadName::DiskIOThread)
-		{
-			DiskIOTaskQueue.push_back(pTask);
-		}
-		else
-		{
-			//由于不是占用IO这样敏感资源
-			//通用task exectioner 都使用最近最少任务规则
-			//
-			//由于这里没有无锁队列，这里的任务数为所有在执行或者即将要进入执行队列的数目为参考。
-			locked_queue<Task*>* leastQueue = &generalTaskQueues[0];
-			for (size_t i = 1; i < kTaskExectionJob; i += 1)
-			{
-				int c = generalTaskQueues[i].size();
-				int l = leastQueue->size();
-				if (c < l)
-				{
-					leastQueue = &generalTaskQueues[i];
-				}
+				std::stringstream ss;
+				ss << std::this_thread::get_id();
+				std::string threadID = ss.str();
+				printf("[thread_%s]:", threadID.c_str());
+				task->Execute();
 			}
 
-			leastQueue->push_back(pTask);
-		}
-	}
-
-	void WorkThreadRoute(locked_queue<Task*>* queue)
-	{
-		while (threadRunning || queue->size() > 0)
-		{
-			if (queue->size() > 0)
-			{
-				std::vector<Task*> tempQueue;
-
-				queue->exchange(tempQueue);
-				for (Task* pTask : tempQueue)
-				{
-					std::stringstream ss;
-					ss << std::this_thread::get_id();
-					std::string threadID = ss.str();
-					printf("[thread_%s]:", threadID.c_str());
-					pTask->Execute();
-					delete pTask;
-					queue->DecreaseCount();
-				}
-			}
-
-
+			fetchedTask = queue->dequeue(task);
 			//这个循环可以不用一直循环
 			//通过event通知/挂起会节省很多空循环
 			//但是不影响功能就先不管了
 		}
 		//printf("exection thread quit.\n");
 	}
-
 	void Join()
 	{
-		threadRunning = false;
-		scheduleThread.join();
-		for (std::thread& t : generalWorkingThreads)
+		for (std::thread& t : workThreads)
 		{
 			t.join();
 		}
-		HDDIOWorkingThread.join();
+		diskIOThread.join();
 
 	}
 };
 
-
-struct FooGraph
+void GraphTask::SchedulerMe()
 {
+	if (IsReady())
+	{
+		TaskScheduler::Instance().ScheduleTask(this);
+	}
+}
+
+struct Task
+{
+	static Task StartTask(ThreadName name, std::function<void()>&& routine, GraphTask** pPrerequistes = NULL, unsigned int prerequisteCount = 0)
+	{
+		return Task(GraphTask::StartTask(name, std::move(routine), pPrerequistes, prerequisteCount));
+	}
+
+	Task ContinueWith(ThreadName name, std::function<void()>&& routine)
+	{
+		if (mTaskPtr)
+		{
+			return Task(mTaskPtr->ContinueWith(name, std::move(routine)));
+		}
+		else
+		{
+			return Task();
+		}
+	}
+
+	Task() = default;
+
+	~Task()
+	{
+		ReleaseRef();
+	}
+
+	Task(Task&& task)
+		: mTaskPtr(task.mTaskPtr)
+		, mCountPtr(task.mCountPtr)
+	{
+		task.mCountPtr = nullptr;
+	}
+
+	Task(const Task& task)
+		: mTaskPtr(task.mTaskPtr)
+		, mCountPtr(task.mCountPtr)
+	{
+		mCountPtr->fetch_add(1);
+	}
+
+	Task& operator=(const Task& task)
+	{
+		task.mCountPtr->fetch_add(1);
+		ReleaseRef();
+		mCountPtr = task.mCountPtr;
+		mTaskPtr = task.mTaskPtr;
+		return *this;
+	}
+
+	void SpinJoin()
+	{
+		if (mTaskPtr)
+		{
+			mTaskPtr->SpinJoin();
+			ReleaseRef();
+		}
+	}
+
+	void ManualRelease()
+	{
+		if (mCountPtr)
+		{
+			mCountPtr->fetch_sub(1);
+			ReleaseRef();
+		}
+		
+
+	}
+
+	friend bool operator==(const Task& lhs, const Task& rhs)
+	{
+		return lhs.mTaskPtr == rhs.mTaskPtr;
+	}
+private:
+	void ReleaseRef()
+	{
+		if (mCountPtr)
+		{
+			if (mCountPtr->load(std::memory_order_acquire) == 1)
+			{
+				delete mCountPtr;
+				mTaskPtr->AutoRecycle();
+				mCountPtr = nullptr;
+				mTaskPtr = nullptr;
+			}
+		}
+	}
+
+	Task(GraphTask* pTask)
+		: mTaskPtr(pTask)
+		, mCountPtr(new std::atomic<int>(1))
+	{
+
+	}
+
+	std::atomic<int>* mCountPtr = nullptr;
+	GraphTask* mTaskPtr = nullptr;
+};
+int main()
+{
+	TaskScheduler::Instance();
+
+	//由于使用了唯一的HDD Thread，所以图里的第一个hello world任务会顺序执行，
+	//第二个任务使用的是work thread，线程只有3个，所以至少3个task应该是并行执行
+	//最后一个看执行的情况吧
 	struct IOParam
 	{
 		int i = 0;
-	};
 
-	IOParam param;
-	TTaskGraph<IOParam> graph;
+		Task finalTask;
+	} graphs[4];
 
-	FooGraph()
+	int i = 0;
+
+	for (IOParam& param : graphs)
 	{
-		TTask<IOParam>* task = graph.CreateTask(ThreadName::DiskIOThread, [this](IOParam* param) {
-			printf("%x:hello world\n", (unsigned int)this);
+		Task task = Task::StartTask(ThreadName::DiskIOThread, [&]() {
 
-			std::this_thread::sleep_for(std::chrono::seconds(1));
+			printf("%x:hello world\n", (unsigned int)&param);
 
-			param->i += 1;
+			std::this_thread::sleep_for(std::chrono::seconds(2));
+
+			param.i += 1;
 		});
 
-		TTask<IOParam>* task2 = graph.CreateTask(ThreadName::DontCare, [this](IOParam* param) {
-			printf("%x:hi too\n", (unsigned int)this);
+		 param.finalTask = task.ContinueWith(ThreadName::DontCare, [&]() {
+			 printf("%x:hi too\n", (unsigned int)&param);
 
-			std::this_thread::sleep_for(std::chrono::seconds(5));
+			 std::this_thread::sleep_for(std::chrono::seconds(5));
 
-			param->i += 1;
-		});
+			 param.i += 1;
 
-		graph.MakeDependency(task, task2);
+			 printf("%x:done.\n", (unsigned int)&param);
+		 });
 	}
 
-	void Start(TaskScheduler& scheduler)
+	for (IOParam& param : graphs)
 	{
-		graph.SetParameter(&param);
-		scheduler.StartSchedule(graph);
+		param.finalTask.SpinJoin();
 	}
 
-	void Join()
+	size_t index = 1;
+
+	for (IOParam& param : graphs)
 	{
-		graph.Join();
+		std::cout << "graphEvent" << index++ 
+			<< ".mParameter.i = " << param.i << "\n";
+
+		param.finalTask.ManualRelease();
 	}
-};
 
-int main()
-{
-	TaskScheduler scheduler;
-
-	FooGraph graph1;
-	FooGraph graph2;
-	FooGraph graph3;
-	FooGraph graph4;
-
-	graph1.Start(scheduler);
-	graph2.Start(scheduler);
-	graph3.Start(scheduler);
-	//前三个应该是并行执行，最后一个看执行的情况吧
-	//至少会有了。
-	graph4.Start(scheduler);
-
-	graph1.Join();
-	graph2.Join();
-	graph3.Join();
-	graph4.Join();
-
-	scheduler.Join();
-	std::cout << "graph1:" << graph1.param.i << "\n"
-		<< "graph2:" << graph2.param.i << "\n"
-		<< "graph3:" << graph3.param.i << "\n"
-		<< "graph4:" << graph4.param.i << "\n";
+	TaskScheduler::Shutdown();
 	return 0;
 }
