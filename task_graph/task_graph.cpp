@@ -35,6 +35,7 @@ protected:
 		{
 			newTask->mThreadName = name;
 			newTask->mRoutine = std::move(routine);
+			newTask->ClearSubSequents();
 		}
 
 		newTask->mAutoRecycle.store(false, std::memory_order_release);
@@ -135,9 +136,14 @@ protected:
 		}
 	}
 
+	void ClearSubSequents()
+	{
+		std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
+		mSubsequents.clear();
+	}
+
 	bool AddSubSequent(GraphTask* pNextTask)
 	{
-
 		//make sure fore and next are in the same graph.
 		//and make no cycles in the graph if we establish a dependence.
 		if (!mFinished.load(std::memory_order_acquire))
