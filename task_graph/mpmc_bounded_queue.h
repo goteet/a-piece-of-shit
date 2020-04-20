@@ -19,9 +19,9 @@ struct locked_queue
 		v.push_back(ele);
 	}
 
-	void DecreaseCount() { numTasks.fetch_sub(1); }
+	void DecreaseCount() { numTasks.fetch_sub(1, std::memory_order_release); }
 
-	void IncreaseCount() { numTasks.fetch_add(1); }
+	void IncreaseCount() { numTasks.fetch_add(1, std::memory_order_release); }
 
 	size_t size() const { return numTasks.load(std::memory_order_acquire); }
 

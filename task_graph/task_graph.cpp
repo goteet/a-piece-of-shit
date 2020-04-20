@@ -9,6 +9,27 @@
 #include <assert.h>
 #include "mpmc_bounded_queue.h"
 
+const bool kSleepFor = false;
+const bool kOutputDebugInfo = true;
+
+
+void print_(const char* fmt)
+{
+	if (kOutputDebugInfo)
+	{
+		printf(fmt);
+	}
+}
+
+template<typename ...Args>
+void print_(const char* fmt, Args... args)
+{
+	if (kOutputDebugInfo)
+	{
+		printf(fmt, args...);
+	}
+}
+
 
 enum class ThreadName
 {
@@ -17,6 +38,10 @@ enum class ThreadName
 	MainThread,		//现在这个没支持，这两个线程的exection可能需要维持在一定时间内，通过 fiber 让出时间片?
 	RenderThread,	//主要是提供给d3d填充资源之类的，不过现在没支持
 	DiskIOThread,	//读文件用的
+
+	WorkThread_Debug0,
+	WorkThread_Debug1,
+	WorkThread_Debug2,
 };
 
 struct GraphTask
@@ -35,12 +60,11 @@ protected:
 		{
 			newTask->mThreadName = name;
 			newTask->mRoutine = std::move(routine);
-			newTask->ClearSubSequents();
+			newTask->mReference.store(2, std::memory_order_release);
+			newTask->mFinished.store(false, std::memory_order_release);
+			newTask->mRecycled.store(false, std::memory_order_release);
+			newTask->mForeDependencyCount.store(1, std::memory_order_release);
 		}
-
-		newTask->mAutoRecycle.store(false, std::memory_order_release);
-		newTask->mFinished.store(false, std::memory_order_release);
-		newTask->mRecycled.store(false, std::memory_order_release);
 
 		if (pPrerequistes && prerequisteCount > 0)
 		{
@@ -55,8 +79,17 @@ protected:
 
 	static void FreeTask(GraphTask* pTask)
 	{
-		pTask->mRecycled.store(true, std::memory_order_release);
-		sFactoryPool.enqueue(pTask);
+		if (false == pTask->mRecycled.exchange(true, std::memory_order_release))
+		{
+			if (!sFactoryPool.enqueue(pTask))
+			{
+				assert(false);
+			}
+		}
+		else
+		{
+			assert(false);
+		}
 	}
 
 	static void ReleaseCacheTasks()
@@ -88,57 +121,44 @@ protected:
 protected://internal used.
 	void Execute()
 	{
+		if (mRoutine == nullptr)
+		{
+			assert(false);
+		}
+		assert(mRoutine != nullptr);
 		mRoutine();
-		Notify();
-		mFinished.store(true, std::memory_order_relaxed);
-		if (mAutoRecycle.load(std::memory_order_acquire))
-		{
-			GraphTask::FreeTask(this);
-		}
-		
+
+		NotifySubsequents();
+		TryRecycle();
 	}
 
-	void AutoRecycle()
+	void TryRecycle()
 	{
-		if (mFinished.load(std::memory_order_acquire))
+		if (mReference.fetch_sub(1) == 1)
 		{
 			GraphTask::FreeTask(this);
 		}
-		else
-		{
-			//pending to finish the task.
-			mAutoRecycle.store(true,std::memory_order_release);
-		}
 	}
-
-	bool IsReady() const { return mForeDependencyCount.load(std::memory_order_acquire) == 0; }
 
 	ThreadName DesireExecutionOn() const { return mThreadName; }
 
 protected:
 	GraphTask(ThreadName name, std::function<void()>&& routine)
-		:  mThreadName(name)
+		: mThreadName(name)
 		, mRoutine(routine)
 	{
 
 	}
 
-	unsigned int ForeDependencyCount() const { return mForeDependencyCount; }
-
-	void Notify()
+	void NotifySubsequents()
 	{
 		std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
+		mFinished.store(true, std::memory_order_release);
 		for (size_t id = 0; id < mSubsequents.size(); id += 1)
 		{
 			GraphTask* task = mSubsequents[id];
-			task->mForeDependencyCount.fetch_sub(1);
 			task->SchedulerMe();
 		}
-	}
-
-	void ClearSubSequents()
-	{
-		std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
 		mSubsequents.clear();
 	}
 
@@ -149,7 +169,7 @@ protected:
 		if (!mFinished.load(std::memory_order_acquire))
 		{
 			std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
-			if (!pNextTask->RecursiveSearchSubSequents(this))
+			if (!mFinished.load(std::memory_order_acquire) && !pNextTask->RecursiveSearchSubSequents(this))
 			{
 				mSubsequents.push_back(pNextTask);
 				pNextTask->mForeDependencyCount.fetch_add(1);
@@ -167,8 +187,9 @@ private:
 		return std::find(mSubsequents.begin(), mSubsequents.end(), pTask) != mSubsequents.end();
 	}
 
-	bool RecursiveSearchSubSequents(GraphTask* pTask) const
+	bool RecursiveSearchSubSequents(GraphTask* pTask)
 	{
+		std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
 		if (IsSubSequentTask(pTask))
 		{
 			return true;
@@ -189,17 +210,17 @@ private:
 	static mpmc_bounded_queue<GraphTask*> sFactoryPool;
 
 	ThreadName mThreadName = ThreadName::WorkThread;
-	std::atomic<bool> mAutoRecycle = false;
 	std::atomic<bool> mFinished = false;
 	std::atomic<bool> mRecycled = false;
-	std::atomic<int> mForeDependencyCount = 0;
+	std::atomic<int> mForeDependencyCount = 1;
+	std::atomic<int> mReference = 2;
 	std::mutex mSubseuquentsMutex;
 	std::vector<GraphTask*> mSubsequents;
 	std::function<void()> mRoutine;
 };
 
 
-const int kMaxTaskCount = 4096;
+const int kMaxTaskCount = 0x100000;
 mpmc_bounded_queue<GraphTask*> GraphTask::sFactoryPool(kMaxTaskCount);
 
 struct TaskScheduler
@@ -222,11 +243,24 @@ public://internal use.
 	{
 		if (task->DesireExecutionOn() == ThreadName::DiskIOThread)
 		{
-			diskIOThreadTaskQueue.enqueue(task);
+			if (!diskIOThreadTaskQueue.enqueue(task))
+			{
+				assert(false);
+			}
 		}
+		//else if (task->DesireExecutionOn() == ThreadName::WorkThread
+		//	|| task->DesireExecutionOn() == ThreadName::WorkThread_Debug0
+		//	|| task->DesireExecutionOn() == ThreadName::WorkThread_Debug1
+		//	|| task->DesireExecutionOn() == ThreadName::WorkThread_Debug2)
+		//{
+		//
+		//}
 		else
 		{
-			workThreadTaskQueue.enqueue(task);
+			if (!workThreadTaskQueue.enqueue(task))
+			{
+				assert(false);
+			}
 		}
 	}
 
@@ -241,8 +275,8 @@ private:
 	mpmc_bounded_queue<GraphTask*> workThreadTaskQueue;
 
 	TaskScheduler()
-		: diskIOThreadTaskQueue(1024)
-		, workThreadTaskQueue(2048)
+		: diskIOThreadTaskQueue(kMaxTaskCount)
+		, workThreadTaskQueue(kMaxTaskCount)
 	{
 		for (size_t i = 0; i < kNumWorThread; i += 1)
 		{
@@ -262,7 +296,7 @@ private:
 				std::stringstream ss;
 				ss << std::this_thread::get_id();
 				std::string threadID = ss.str();
-				printf("[thread_%s]:", threadID.c_str());
+				print_("[thread_%s]:", threadID.c_str());
 				task->Execute();
 			}
 
@@ -286,7 +320,7 @@ private:
 
 void GraphTask::SchedulerMe()
 {
-	if (IsReady())
+	if (mForeDependencyCount.fetch_sub(1) == 1)
 	{
 		TaskScheduler::Instance().ScheduleTask(this);
 	}
@@ -352,13 +386,7 @@ struct Task
 
 	void ManualRelease()
 	{
-		if (mCountPtr)
-		{
-			mCountPtr->fetch_sub(1);
-			ReleaseRef();
-		}
-		
-
+		ReleaseRef();
 	}
 
 	friend bool operator==(const Task& lhs, const Task& rhs)
@@ -370,10 +398,10 @@ private:
 	{
 		if (mCountPtr)
 		{
-			if (mCountPtr->load(std::memory_order_acquire) == 1)
+			if (mCountPtr->fetch_sub(1) == 1)
 			{
 				delete mCountPtr;
-				mTaskPtr->AutoRecycle();
+				mTaskPtr->TryRecycle();
 				mCountPtr = nullptr;
 				mTaskPtr = nullptr;
 			}
@@ -390,8 +418,19 @@ private:
 	std::atomic<int>* mCountPtr = nullptr;
 	GraphTask* mTaskPtr = nullptr;
 };
+
+
+void sleep_for_milliseconds(unsigned int msec)
+{
+	if (kSleepFor)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(msec));
+	}
+}
+
 int main()
 {
+	const int N = 0x5000;
 	TaskScheduler::Instance();
 
 	//由于使用了唯一的HDD Thread，所以图里的第一个hello world任务会顺序执行，
@@ -402,30 +441,30 @@ int main()
 		int i = 0;
 
 		Task finalTask;
-	} graphs[4];
+	} graphs[N];
 
 	int i = 0;
 
 	for (IOParam& param : graphs)
 	{
-		Task task = Task::StartTask(ThreadName::DiskIOThread, [&]() {
-
-			printf("%x:hello world\n", (unsigned int)&param);
-
-			std::this_thread::sleep_for(std::chrono::seconds(2));
-
+		Task firstTask = Task::StartTask(ThreadName::DiskIOThread, [&]() {
+			print_("%x:hello world\n", (unsigned int)&param);
+			sleep_for_milliseconds(500);
 			param.i += 1;
 		});
 
-		 param.finalTask = task.ContinueWith(ThreadName::DontCare, [&]() {
-			 printf("%x:hi too\n", (unsigned int)&param);
+		Task secondTask = firstTask.ContinueWith(ThreadName::WorkThread_Debug0, [&]() {
+			print_("%x:hi too\n", (unsigned int)&param);
+			sleep_for_milliseconds(1200);
+			param.i += 1;
+		});
 
-			 std::this_thread::sleep_for(std::chrono::seconds(5));
-
-			 param.i += 1;
-
-			 printf("%x:done.\n", (unsigned int)&param);
-		 });
+		param.finalTask = secondTask.ContinueWith(ThreadName::WorkThread_Debug1, [&param, i]() {
+			sleep_for_milliseconds(800);
+			param.i += 1;
+			print_("%x:done:0x%x.\n", (unsigned int)&param, i);
+		});
+		i++;
 	}
 
 	for (IOParam& param : graphs)
@@ -437,9 +476,9 @@ int main()
 
 	for (IOParam& param : graphs)
 	{
-		std::cout << "graphEvent" << index++ 
-			<< ".mParameter.i = " << param.i << "\n";
-
+		//std::cout << "graphEvent" << index++
+		//	<< ".mParameter.i = " << param.i << "\n";
+		assert(param.i == 3);
 		param.finalTask.ManualRelease();
 	}
 
