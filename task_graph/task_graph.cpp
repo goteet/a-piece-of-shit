@@ -42,14 +42,21 @@ enum class ThreadName
 	WorkThread_Debug0,
 	WorkThread_Debug1,
 	WorkThread_Debug2,
+	WorkThread_Debug3,
 };
+
+struct GraphTask;
+struct Task;
+typedef void (TaskRoute)(Task);
 
 struct GraphTask
 {
 	friend struct Task;
 	friend struct TaskScheduler;
-protected:
-	static GraphTask* StartTask(ThreadName name, std::function<void()>&& routine, GraphTask** pPrerequistes = NULL, unsigned int prerequisteCount = 0)
+
+	bool DontCompleteUntil(GraphTask* task);
+
+	static GraphTask* StartTask(ThreadName name, std::function<TaskRoute>&& routine, GraphTask** pPrerequistes = NULL, unsigned int prerequisteCount = 0)
 	{
 		GraphTask* newTask = nullptr;
 		if (!sFactoryPool.dequeue(newTask))
@@ -60,20 +67,22 @@ protected:
 		{
 			newTask->mThreadName = name;
 			newTask->mRoutine = std::move(routine);
-			newTask->mReference.store(2, std::memory_order_release);
+			newTask->mReferenceCount.store(2, std::memory_order_release);
 			newTask->mFinished.store(false, std::memory_order_release);
 			newTask->mRecycled.store(false, std::memory_order_release);
 			newTask->mForeDependencyCount.store(1, std::memory_order_release);
+			newTask->mDontCompleteUntil.store(false, std::memory_order_release);
+
 		}
 
 		if (pPrerequistes && prerequisteCount > 0)
 		{
 			for (unsigned int i = 0; i < prerequisteCount; i += 1)
 			{
-				pPrerequistes[i]->AddSubSequent(newTask);
+				pPrerequistes[i]->AddSubsequent(newTask);
 			}
 		}
-		newTask->SchedulerMe();
+		newTask->ScheduleMe();
 		return newTask;
 	}
 
@@ -103,7 +112,7 @@ protected:
 
 	virtual ~GraphTask() = default;
 
-	GraphTask* ContinueWith(ThreadName name, std::function<void()>&& routine)
+	GraphTask* ContinueWith(ThreadName name, std::function<TaskRoute>&& routine)
 	{
 		GraphTask* task = this;
 		return StartTask(name, std::move(routine), &task, 1);
@@ -118,23 +127,17 @@ protected:
 	}
 
 
-protected://internal used.
-	void Execute()
-	{
-		if (mRoutine == nullptr)
-		{
-			assert(false);
-		}
-		assert(mRoutine != nullptr);
-		mRoutine();
+private://internal used.
+	void Execute();
 
-		NotifySubsequents();
-		TryRecycle();
+	void AddReference()
+	{
+		mReferenceCount.fetch_add(1);
 	}
 
 	void TryRecycle()
 	{
-		if (mReference.fetch_sub(1) == 1)
+		if (mReferenceCount.fetch_sub(1) == 1)
 		{
 			GraphTask::FreeTask(this);
 		}
@@ -142,8 +145,8 @@ protected://internal used.
 
 	ThreadName DesireExecutionOn() const { return mThreadName; }
 
-protected:
-	GraphTask(ThreadName name, std::function<void()>&& routine)
+private:
+	GraphTask(ThreadName name, std::function<TaskRoute>&& routine)
 		: mThreadName(name)
 		, mRoutine(routine)
 	{
@@ -153,23 +156,27 @@ protected:
 	void NotifySubsequents()
 	{
 		std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
-		mFinished.store(true, std::memory_order_release);
+		if (!mDontCompleteUntil.load(std::memory_order_acquire))
+		{
+			mFinished.store(true, std::memory_order_release);
+			mDontCompleteUntilEmptyTaskRef = nullptr;
+		}
+
 		for (size_t id = 0; id < mSubsequents.size(); id += 1)
 		{
-			GraphTask* task = mSubsequents[id];
-			task->SchedulerMe();
+			GraphTask* subsequent = mSubsequents[id];
+			subsequent->ScheduleMe();
 		}
+
 		mSubsequents.clear();
 	}
 
-	bool AddSubSequent(GraphTask* pNextTask)
+	bool AddSubsequent(GraphTask* pNextTask)
 	{
-		//make sure fore and next are in the same graph.
-		//and make no cycles in the graph if we establish a dependence.
 		if (!mFinished.load(std::memory_order_acquire))
 		{
 			std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
-			if (!mFinished.load(std::memory_order_acquire) && !pNextTask->RecursiveSearchSubSequents(this))
+			if (!mFinished.load(std::memory_order_acquire) && !pNextTask->RecursiveSearchSubsequents(this))
 			{
 				mSubsequents.push_back(pNextTask);
 				pNextTask->mForeDependencyCount.fetch_add(1);
@@ -180,25 +187,25 @@ protected:
 	}
 
 private:
-	void SchedulerMe();
+	void ScheduleMe();
 
-	bool IsSubSequentTask(GraphTask* pTask) const
+	bool IsSubsequentTask(GraphTask* pTask) const
 	{
 		return std::find(mSubsequents.begin(), mSubsequents.end(), pTask) != mSubsequents.end();
 	}
 
-	bool RecursiveSearchSubSequents(GraphTask* pTask)
+	bool RecursiveSearchSubsequents(GraphTask* pTask)
 	{
 		std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
-		if (IsSubSequentTask(pTask))
+		if (IsSubsequentTask(pTask))
 		{
 			return true;
 		}
 		else
 		{
-			for (GraphTask* pTask : mSubsequents)
+			for (GraphTask* pSubsquent : mSubsequents)
 			{
-				if (pTask->IsSubSequentTask(pTask))
+				if (pSubsquent->IsSubsequentTask(pTask))
 					return true;
 			}
 
@@ -212,11 +219,13 @@ private:
 	ThreadName mThreadName = ThreadName::WorkThread;
 	std::atomic<bool> mFinished = false;
 	std::atomic<bool> mRecycled = false;
+	std::atomic<bool> mDontCompleteUntil = false;
 	std::atomic<int> mForeDependencyCount = 1;
-	std::atomic<int> mReference = 2;
+	std::atomic<int> mReferenceCount = 2;
 	std::mutex mSubseuquentsMutex;
 	std::vector<GraphTask*> mSubsequents;
-	std::function<void()> mRoutine;
+	std::function<TaskRoute> mRoutine;
+	GraphTask* mDontCompleteUntilEmptyTaskRef = nullptr;
 };
 
 
@@ -251,7 +260,8 @@ public://internal use.
 		//else if (task->DesireExecutionOn() == ThreadName::WorkThread
 		//	|| task->DesireExecutionOn() == ThreadName::WorkThread_Debug0
 		//	|| task->DesireExecutionOn() == ThreadName::WorkThread_Debug1
-		//	|| task->DesireExecutionOn() == ThreadName::WorkThread_Debug2)
+		//	|| task->DesireExecutionOn() == ThreadName::WorkThread_Debug2
+		//	|| task->DesireExecutionOn() == ThreadName::WorkThread_Debug3)
 		//{
 		//
 		//}
@@ -318,9 +328,14 @@ private:
 	}
 };
 
-void GraphTask::SchedulerMe()
+void GraphTask::ScheduleMe()
 {
-	if (mForeDependencyCount.fetch_sub(1) == 1)
+	if (mDontCompleteUntil.load(std::memory_order_acquire))
+	{
+		mFinished.store(true, std::memory_order_release);
+		TryRecycle();
+	}
+	else if (mForeDependencyCount.fetch_sub(1) == 1)
 	{
 		TaskScheduler::Instance().ScheduleTask(this);
 	}
@@ -328,16 +343,26 @@ void GraphTask::SchedulerMe()
 
 struct Task
 {
-	static Task StartTask(ThreadName name, std::function<void()>&& routine, GraphTask** pPrerequistes = NULL, unsigned int prerequisteCount = 0)
+	static Task StartTask(ThreadName name, std::function<TaskRoute> routine, GraphTask** pPrerequistes = NULL, unsigned int prerequisteCount = 0)
 	{
-		return Task(GraphTask::StartTask(name, std::move(routine), pPrerequistes, prerequisteCount));
+		//程序启动时，为了防止运行到这一步之前，task完成之后就回收。
+		//默认 reference = 2; 在Task 构造函数内会有reference增加的操作
+		Task taskWrapper(GraphTask::StartTask(name, std::move(routine), pPrerequistes, prerequisteCount));
+		//所以这里可以把构造时的第二个引用去掉了。
+		taskWrapper.mTaskPtr->TryRecycle();
+		return taskWrapper;
 	}
 
-	Task ContinueWith(ThreadName name, std::function<void()>&& routine)
+	Task ContinueWith(ThreadName name, std::function<TaskRoute>&& routine)
 	{
 		if (mTaskPtr)
 		{
-			return Task(mTaskPtr->ContinueWith(name, std::move(routine)));
+			//程序启动时，为了防止运行到这一步之前，task完成之后就回收。
+			//默认 reference = 2; 在Task 构造函数内会有reference增加的操作
+			Task taskWrapper(mTaskPtr->ContinueWith(name, std::move(routine)));
+			//所以这里可以把构造时的第二个引用去掉了。
+			taskWrapper.mTaskPtr->TryRecycle();
+			return taskWrapper;
 		}
 		else
 		{
@@ -345,6 +370,19 @@ struct Task
 		}
 	}
 
+	bool DontCompleteUntil(Task task)
+	{
+		if (mTaskPtr && task.mTaskPtr)
+		{
+			return mTaskPtr->DontCompleteUntil(task.mTaskPtr);
+		}
+		else
+		{
+			return false;
+		}
+	}
+
+public:
 	Task() = default;
 
 	~Task()
@@ -357,6 +395,7 @@ struct Task
 		, mCountPtr(task.mCountPtr)
 	{
 		task.mCountPtr = nullptr;
+		task.mTaskPtr = nullptr;
 	}
 
 	Task(const Task& task)
@@ -393,6 +432,16 @@ struct Task
 	{
 		return lhs.mTaskPtr == rhs.mTaskPtr;
 	}
+
+
+public://internal used
+	Task(GraphTask* pTask)
+		: mTaskPtr(pTask)
+		, mCountPtr(new std::atomic<int>(1))
+	{
+		mTaskPtr->AddReference();
+	}
+
 private:
 	void ReleaseRef()
 	{
@@ -408,16 +457,19 @@ private:
 		}
 	}
 
-	Task(GraphTask* pTask)
-		: mTaskPtr(pTask)
-		, mCountPtr(new std::atomic<int>(1))
-	{
-
-	}
-
 	std::atomic<int>* mCountPtr = nullptr;
 	GraphTask* mTaskPtr = nullptr;
 };
+
+void GraphTask::Execute()
+{
+	{
+		Task taskWrapper(this);
+		mRoutine(taskWrapper);
+	}
+	NotifySubsequents();
+	TryRecycle();
+}
 
 
 void sleep_for_milliseconds(unsigned int msec)
@@ -428,9 +480,47 @@ void sleep_for_milliseconds(unsigned int msec)
 	}
 }
 
+
+bool GraphTask::DontCompleteUntil(GraphTask* task)
+{
+	if (mDontCompleteUntilEmptyTaskRef == nullptr)
+	{
+		mDontCompleteUntilEmptyTaskRef = this->ContinueWith(ThreadName::WorkThread_Debug2,
+			[](Task thisTask) {}
+		);
+		mDontCompleteUntilEmptyTaskRef->TryRecycle();
+
+		//把后续任务加入队列
+		std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
+		for (GraphTask* pSubsequent : mSubsequents)
+		{
+			if (pSubsequent != mDontCompleteUntilEmptyTaskRef)
+			{
+				mDontCompleteUntilEmptyTaskRef->AddSubsequent(pSubsequent);
+			}
+		}
+
+		//把自己加入队列，形成有环图，这很危险
+		//加引用的为了在this task在重入ScheduleMe的时候，
+		//直接使用调用 TryRelease 来释放资源方便点
+		AddReference();
+		mDontCompleteUntilEmptyTaskRef->mSubsequents.push_back(this);
+		mDontCompleteUntil.store(true, std::memory_order_release);
+	}
+
+	GraphTask* pTask = task;
+	if (pTask != nullptr)
+	{
+		if (pTask->AddSubsequent(mDontCompleteUntilEmptyTaskRef))
+		{
+			return true;
+		}
+	}
+	return false;
+}
 int main()
 {
-	const int N = 0x5000;
+	const int N = 0x100;
 	TaskScheduler::Instance();
 
 	//由于使用了唯一的HDD Thread，所以图里的第一个hello world任务会顺序执行，
@@ -438,7 +528,7 @@ int main()
 	//最后一个看执行的情况吧
 	struct IOParam
 	{
-		int i = 0;
+		std::atomic<int> i = 0;
 
 		Task finalTask;
 	} graphs[N];
@@ -447,23 +537,32 @@ int main()
 
 	for (IOParam& param : graphs)
 	{
-		Task firstTask = Task::StartTask(ThreadName::DiskIOThread, [&]() {
+		param.finalTask = Task::StartTask(ThreadName::DiskIOThread, [&](Task thisTask) {
 			print_("%x:hello world\n", (unsigned int)&param);
 			sleep_for_milliseconds(500);
 			param.i += 1;
-		});
-
-		Task secondTask = firstTask.ContinueWith(ThreadName::WorkThread_Debug0, [&]() {
+		}).ContinueWith(ThreadName::WorkThread_Debug0, [&](Task thisTask) {
 			print_("%x:hi too\n", (unsigned int)&param);
 			sleep_for_milliseconds(1200);
 			param.i += 1;
-		});
-
-		param.finalTask = secondTask.ContinueWith(ThreadName::WorkThread_Debug1, [&param, i]() {
+		}).ContinueWith(ThreadName::WorkThread_Debug1, [&](Task thisTask) {
 			sleep_for_milliseconds(800);
 			param.i += 1;
+
+			for (int j = 0; j < 5; j += 1)
+			{
+				Task depTask = Task::StartTask(ThreadName::WorkThread_Debug3, [&param, j](Task thisTask) {
+					print_(" dont complete until this:%d\n", j);
+					sleep_for_milliseconds(300);
+					param.i.fetch_add(1);
+				});
+
+				thisTask.DontCompleteUntil(depTask);
+			}
+		}).ContinueWith(ThreadName::WorkThread, [&param, i](Task thisTask) {
 			print_("%x:done:0x%x.\n", (unsigned int)&param, i);
 		});
+
 		i++;
 	}
 
@@ -476,9 +575,14 @@ int main()
 
 	for (IOParam& param : graphs)
 	{
-		//std::cout << "graphEvent" << index++
-		//	<< ".mParameter.i = " << param.i << "\n";
-		assert(param.i == 3);
+
+		if (param.i != 8)
+		{
+			std::cout << "graphEvent" << i
+				<< ".mParameter.i = " << param.i << "\n";
+			assert(false);
+		}
+		index += 1;
 		param.finalTask.ManualRelease();
 	}
 

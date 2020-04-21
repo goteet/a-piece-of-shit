@@ -1,5 +1,6 @@
 #pragma once
 
+#include <assert.h>
 #include <vector>
 #include <mutex>
 #include <atomic>
@@ -7,6 +8,43 @@
 template<typename T>
 struct locked_queue
 {
+	locked_queue() = default;
+
+	locked_queue(size_t s)
+	{
+		v.reserve(s);
+	}
+
+	void enqueue(T& q)
+	{
+		std::lock_guard <std::mutex> guard(mutex);
+		std::vector<T>::iterator f = std::find(v.begin(), v.end(), q);
+		if (f == v.end())
+		{
+			v.push_back(q);
+		}
+		else
+		{
+			assert(false);
+		}
+		
+	}
+
+	bool dequeue(T& q)
+	{
+		std::lock_guard <std::mutex> guard(mutex);
+		if (v.size() == 0)
+		{
+			return false;
+		}
+		else
+		{
+			q = v.back();
+			v.pop_back();
+			return true;
+		}
+
+	}
 	void exchange(std::vector<T>& other)
 	{
 		std::lock_guard <std::mutex> guard(mutex);
