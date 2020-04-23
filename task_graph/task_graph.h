@@ -31,6 +31,8 @@ struct Task
 
 	bool DontCompleteUntil(Task task);
 
+	bool IsComplete() const;
+
 	void SpinJoin();
 
 	void ManualRelease();
@@ -83,9 +85,11 @@ struct GraphTask
 
 	void Release();
 
-	bool IsFinished();
+	bool IsFinished() const;
 
-	bool IsRecycled();
+	bool IsRecycled() const;
+
+	bool IsAvailable() const;
 
 private://internal used.
 	void Execute();
@@ -100,9 +104,11 @@ private://internal used.
 
 	void ScheduleMe();
 
-	bool IsSubsequentTask(GraphTask* pTask) const;
-
-	bool RecursiveSearchSubsequents(GraphTask* pTask);
+	/**
+	* 因为有 DonCompleteUntilEmptyTask 的存在，
+	* 不得不考虑有环的结果，需要避免循环加锁的问题。
+	*/
+	bool RecursiveSearchSubsequents(std::vector<GraphTask*>&, GraphTask* pTask);
 
 	static mpmc_bounded_queue<GraphTask*> sFactoryPool;
 
@@ -110,12 +116,21 @@ private://internal used.
 	std::atomic<bool> mFinished = false;
 	std::atomic<bool> mRecycled = false;
 	std::atomic<bool> mDontCompleteUntil = false;
-	std::atomic<int> mForeDependencyCount = 1;
+	std::atomic<int> mAntecedentDependencyCount = 1;
 	std::atomic<int> mReferenceCount = 2;
+	std::function<TaskRoute> mTaskRoute;
+	GraphTask* mDontCompleteUntilEmptyTask = nullptr;
+
+	/**
+	* Subsequents 一共有4个地方会访问，
+	*	- 在运行完成时，会通过Subsequents广播完成消息，之后Subsequents应该无法再访问。
+	*	- 在任意时刻，调用AddSubsequents。Antecedent Task 完成之后，不应该再加入 Subsequents。
+	*		否则会因为无法antecedent通知，depedency count 无法自减而导致无法执行。
+	*	- 在 DontCompleteUntil() 函数内会调用AddSubsequents。
+	*	- 在 AddSubsequents 的时候，需要递归检查有向环。
+	*/
 	std::mutex mSubseuquentsMutex;
 	std::vector<GraphTask*> mSubsequents;
-	std::function<TaskRoute> mRoutine;
-	GraphTask* mDontCompleteUntilEmptyTaskRef = nullptr;
 };
 
 struct TaskScheduler

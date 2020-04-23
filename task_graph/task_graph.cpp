@@ -17,94 +17,105 @@ void GraphTask::ScheduleMe()
 	}
 	else
 	{
-		assert(!mFinished.load(std::memory_order_acquire) &&
-			!mRecycled.load(std::memory_order_acquire) &&
-			mForeDependencyCount.load(std::memory_order_acquire) > 0);
+		assert(!IsFinished() && !IsRecycled() && !IsAvailable());
 
-		if (mForeDependencyCount.fetch_sub(1) == 1)
+		if (mAntecedentDependencyCount.fetch_sub(1) == 1)
 		{
 			TaskScheduler::Instance().ScheduleTask(this);
 		}
 	}
 }
 
-bool GraphTask::IsSubsequentTask(GraphTask * pTask) const
+bool IsContained(const std::vector<GraphTask*>& vec, GraphTask * pTask)
 {
-	return std::find(mSubsequents.begin(), mSubsequents.end(), pTask) != mSubsequents.end();
+	return std::find(vec.begin(), vec.end(), pTask) != vec.end();
 }
 
-bool GraphTask::RecursiveSearchSubsequents(GraphTask * pTask)
+bool GraphTask::RecursiveSearchSubsequents(std::vector<GraphTask*>& checkedTasks, GraphTask* pTask)
 {
-	std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
-	if (IsSubsequentTask(pTask))
+	//避免循环锁。
+	if (!IsContained(checkedTasks, this))
 	{
-		return true;
-	}
-	else
-	{
+		checkedTasks.push_back(this);
+
+		std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
 		for (GraphTask* pSubsquent : mSubsequents)
 		{
-			if (pSubsquent->IsSubsequentTask(pTask))
+			if (pSubsquent == pTask ||
+				pSubsquent->RecursiveSearchSubsequents(checkedTasks, pTask))
+			{
 				return true;
+			}
 		}
 
 		return false;
+	}
+	else
+	{
+		return true;
 	}
 }
 
 //user interface.
 bool GraphTask::DontCompleteUntil(GraphTask * task)
 {
-	if (mDontCompleteUntilEmptyTaskRef == nullptr)
+	if (mDontCompleteUntilEmptyTask == nullptr)
 	{
 		//把自己加入队列，形成有环图，这很危险
 		//加引用的为了在this task在重入ScheduleMe的时候，
 		//直接使用调用 TryRelease 来释放资源方便点
 		AddReference();
 
-		mDontCompleteUntilEmptyTaskRef = ContinueWith(ThreadName::WorkThread_Debug_Empty,
+		mDontCompleteUntilEmptyTask = ContinueWith(ThreadName::WorkThread_Debug_Empty,
 			[](Task& thisTask) {}
 		);
 
-		//把后续任务加入队列
-		std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
-		for (GraphTask* pSubsequent : mSubsequents)
+		//把后续任务加入队列，这里加锁是为了
+		//防止外部调用AddSubsequents
 		{
-			if (pSubsequent != mDontCompleteUntilEmptyTaskRef)
+			std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
+			for (GraphTask* pSubsequent : mSubsequents)
 			{
-				mDontCompleteUntilEmptyTaskRef->AddSubsequent(pSubsequent);
+				if (pSubsequent != mDontCompleteUntilEmptyTask)
+				{
+					mDontCompleteUntilEmptyTask->AddSubsequent(pSubsequent);
+				}
 			}
 		}
 
+		//因为这个task 是内部构建的，
+		//也不需要再给this->mAntecedentDependencyCount+1了。
+		//所以不会被外部调用到就不加锁了
+		//而且也
 		mDontCompleteUntil.store(true, std::memory_order_release);
-		mDontCompleteUntilEmptyTaskRef->mSubsequents.push_back(this);
-		mDontCompleteUntilEmptyTaskRef->Release();
+		mDontCompleteUntilEmptyTask->mSubsequents.push_back(this);
+		mDontCompleteUntilEmptyTask->Release();
 	}
 
-	if (task->AddSubsequent(mDontCompleteUntilEmptyTaskRef))
+	if (task->AddSubsequent(mDontCompleteUntilEmptyTask))
 	{
 		return true;
 	}
 	return false;
 }
 
-GraphTask * GraphTask::StartTask(ThreadName name, std::function<TaskRoute>&& routine, GraphTask ** pPrerequistes, unsigned int prerequisteCount)
+GraphTask * GraphTask::StartTask(ThreadName name, std::function<TaskRoute>&& taskRoute, GraphTask ** pPrerequistes, unsigned int prerequisteCount)
 {
 	GraphTask* newTask = nullptr;
 	if (sFactoryPool.dequeue(newTask))
 	{
 		newTask->mThreadName = name;
-		newTask->mRoutine = std::move(routine);
+		newTask->mTaskRoute = std::move(taskRoute);
 		newTask->mReferenceCount.store(2, std::memory_order_release);
 		newTask->mFinished.store(false, std::memory_order_release);
 		newTask->mRecycled.store(false, std::memory_order_release);
-		newTask->mForeDependencyCount.store(1, std::memory_order_release);
+		newTask->mAntecedentDependencyCount.store(1, std::memory_order_release);
 		newTask->mDontCompleteUntil.store(false, std::memory_order_release);
-		newTask->mDontCompleteUntilEmptyTaskRef = nullptr;
+		newTask->mDontCompleteUntilEmptyTask = nullptr;
 	}
 	else
 	{
-		newTask = new GraphTask(name, std::move(routine));
+		newTask = new GraphTask(name, std::move(taskRoute));
 	}
 
 	if (pPrerequistes && prerequisteCount > 0)
@@ -125,7 +136,7 @@ void GraphTask::FreeTask(GraphTask * pTask)
 
 	if (false == pTask->mRecycled.exchange(true, std::memory_order_release))
 	{
-		assert(pTask->mFinished.load(std::memory_order_acquire));
+		assert(pTask->IsFinished());
 		if (!sFactoryPool.enqueue(pTask))
 		{
 			assert(false);
@@ -152,7 +163,7 @@ GraphTask * GraphTask::ContinueWith(ThreadName name, std::function<TaskRoute>&& 
 
 void GraphTask::SpinJoin()
 {
-	while (!mFinished.load(std::memory_order_acquire))
+	while (!IsFinished())
 	{
 
 	}
@@ -160,10 +171,15 @@ void GraphTask::SpinJoin()
 
 void GraphTask::Execute()
 {
-
+	//执行 Route
 	{
 		Task taskWrapper(this);
-		mRoutine(taskWrapper);
+		mTaskRoute(taskWrapper);
+	}
+
+	if (!mDontCompleteUntil.load(std::memory_order_acquire))
+	{
+		mFinished.store(true, std::memory_order_release);
 	}
 	NotifySubsequents();
 	Release();
@@ -182,60 +198,59 @@ void GraphTask::Release()
 	}
 }
 
-bool GraphTask::IsFinished()
+bool GraphTask::IsFinished() const
 {
 	return mFinished.load(std::memory_order_acquire);
 }
 
-bool GraphTask::IsRecycled()
+bool GraphTask::IsRecycled() const
 {
 	return mRecycled.load(std::memory_order_acquire);
 }
 
-GraphTask::GraphTask(ThreadName name, std::function<TaskRoute>&& routine)
+bool GraphTask::IsAvailable() const
+{
+	return mAntecedentDependencyCount.load(std::memory_order_acquire) == 0;
+}
+
+GraphTask::GraphTask(ThreadName name, std::function<TaskRoute>&& taskRoute)
 	: mThreadName(name)
-	, mRoutine(routine)
+	, mTaskRoute(taskRoute)
 {
 
 }
 
 void GraphTask::NotifySubsequents()
 {
-	std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
-	if (!mDontCompleteUntil.load(std::memory_order_acquire))
+	std::vector<GraphTask*> localSubsequents;
+	//加锁访问,
 	{
-		mFinished.store(true, std::memory_order_release);
+		std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
+		localSubsequents.swap(mSubsequents);
 	}
 
-	for (size_t id = 0; id < mSubsequents.size(); id += 1)
+	for (GraphTask* subsequent : localSubsequents)
 	{
-		GraphTask* subsequent = mSubsequents[id];
+		assert(!subsequent->IsFinished() && !subsequent->IsRecycled());
 
-
-		assert(!subsequent->mFinished.load(std::memory_order_acquire) &&
-			!subsequent->mRecycled.load(std::memory_order_acquire));
-
-		assert(subsequent->mForeDependencyCount.load(std::memory_order_acquire) > 0
+		assert(!subsequent->IsAvailable()
 			|| subsequent->mDontCompleteUntil.load(std::memory_order_acquire));
 
 		subsequent->ScheduleMe();
 	}
-	mSubsequents.clear();
 }
 
 bool GraphTask::AddSubsequent(GraphTask * pNextTask)
 {
-	if (!mFinished.load(std::memory_order_acquire))
+	std::vector<GraphTask*> checkedTasks;
+	if (this != pNextTask && !pNextTask->RecursiveSearchSubsequents(checkedTasks, this))
 	{
-		std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
-		if (!pNextTask->RecursiveSearchSubsequents(this))
+		if (!IsFinished())
 		{
-			if (!mFinished.load(std::memory_order_acquire))
-			{
-				pNextTask->mForeDependencyCount.fetch_add(1);
-				mSubsequents.push_back(pNextTask);
-				return true;
-			}
+			std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
+			pNextTask->mAntecedentDependencyCount.fetch_add(1);
+			mSubsequents.push_back(pNextTask);
+			return true;
 		}
 	}
 	return false;
@@ -278,6 +293,18 @@ bool Task::DontCompleteUntil(Task task)
 	else
 	{
 		return false;
+	}
+}
+
+bool Task::IsComplete() const
+{
+	if (mTaskPtr)
+	{
+		return mTaskPtr->IsFinished();
+	}
+	else
+	{
+		return true;
 	}
 }
 
@@ -419,8 +446,9 @@ void TaskScheduler::TaskThreadRoute(mpmc_bounded_queue<GraphTask*>* queue)
 			//std::string threadID = ss.str();
 			//print_("[thread_%s]:", threadID.c_str());
 			task->Execute();
-		}
 
+		}
+		
 		fetchedTask = queue->dequeue(task);
 		//这个循环可以不用一直循环
 		//通过event通知/挂起会节省很多空循环
