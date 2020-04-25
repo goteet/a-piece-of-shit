@@ -1,0 +1,3 @@
+add_library(cxx_library INTERFACE IMPORTED)
+target_compile_options(cxx_library INTERFACE /wd4996)
+target_include_directories(cxx_library INTERFACE ${CXX_LIBRARY_DIR}/include)

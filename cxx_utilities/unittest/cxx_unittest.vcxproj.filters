@@ -1,0 +1,156 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="头文件">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;hm;inl;inc;xsd</Extensions>
+    </Filter>
+    <Filter Include="资源文件">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="cxx_math">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="cxx_math\matrix">
+      <UniqueIdentifier>{62c20628-cc2a-47df-b2aa-7f91a10108b5}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="cxx_math\rotation">
+      <UniqueIdentifier>{d23ff9bb-62bf-4ad9-bf46-173c6b773aba}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="cxx_math\vector">
+      <UniqueIdentifier>{d6c19a53-4653-4de8-b7ec-54034c8aae29}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="cxx_math\bounding">
+      <UniqueIdentifier>{1a11fcbc-56a9-438d-add3-6385a23ad234}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="cxx_cmn">
+      <UniqueIdentifier>{f0a796b4-207a-4282-b92d-086d79f4518c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\source">
+      <UniqueIdentifier>{ba26cf32-a38b-4402-9cbe-00dc552c6ec8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\include">
+      <UniqueIdentifier>{9a88be86-0f78-441e-a7fa-e761268a6e9a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\source\math">
+      <UniqueIdentifier>{27d438dc-ad24-473f-a126-4810f2782946}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="stdafx.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\cxx_cmn.h">
+      <Filter>头文件\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\cxx_math.h">
+      <Filter>头文件\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\cxx_scope.h">
+      <Filter>头文件\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\math\vector.hpp">
+      <Filter>头文件\source</Filter>
+    </ClInclude>
+    <ClInclude Include="..\cxx_cmn.hpp">
+      <Filter>头文件\source</Filter>
+    </ClInclude>
+    <ClInclude Include="..\cxx_scope.hpp">
+      <Filter>头文件\source</Filter>
+    </ClInclude>
+    <ClInclude Include="..\math\aabb.hpp">
+      <Filter>头文件\source\math</Filter>
+    </ClInclude>
+    <ClInclude Include="..\math\angle.hpp">
+      <Filter>头文件\source\math</Filter>
+    </ClInclude>
+    <ClInclude Include="..\math\bounding.hpp">
+      <Filter>头文件\source\math</Filter>
+    </ClInclude>
+    <ClInclude Include="..\math\color.hpp">
+      <Filter>头文件\source\math</Filter>
+    </ClInclude>
+    <ClInclude Include="..\math\matrix.hpp">
+      <Filter>头文件\source\math</Filter>
+    </ClInclude>
+    <ClInclude Include="..\math\ray.hpp">
+      <Filter>头文件\source\math</Filter>
+    </ClInclude>
+    <ClInclude Include="..\math\rotation.hpp">
+      <Filter>头文件\source\math</Filter>
+    </ClInclude>
+    <ClInclude Include="..\math\utility.hpp">
+      <Filter>头文件\source\math</Filter>
+    </ClInclude>
+    <ClInclude Include="..\cxx_file.h">
+      <Filter>头文件\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\cxx_file.hpp">
+      <Filter>头文件\source</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="stdafx.cpp">
+      <Filter>cxx_math</Filter>
+    </ClCompile>
+    <ClCompile Include="rect_test.cpp">
+      <Filter>cxx_math\bounding</Filter>
+    </ClCompile>
+    <ClCompile Include="vector_test.cpp">
+      <Filter>cxx_math\vector</Filter>
+    </ClCompile>
+    <ClCompile Include="color3_test.cpp">
+      <Filter>cxx_math\vector</Filter>
+    </ClCompile>
+    <ClCompile Include="color4_test.cpp">
+      <Filter>cxx_math\vector</Filter>
+    </ClCompile>
+    <ClCompile Include="aabb2d_test.cpp">
+      <Filter>cxx_math\bounding</Filter>
+    </ClCompile>
+    <ClCompile Include="aabb3d_test.cpp">
+      <Filter>cxx_math\bounding</Filter>
+    </ClCompile>
+    <ClCompile Include="matrix2x2_test.cpp">
+      <Filter>cxx_math\matrix</Filter>
+    </ClCompile>
+    <ClCompile Include="matrix3x2_test.cpp">
+      <Filter>cxx_math\matrix</Filter>
+    </ClCompile>
+    <ClCompile Include="matrix3x3_test.cpp">
+      <Filter>cxx_math\matrix</Filter>
+    </ClCompile>
+    <ClCompile Include="matrix4x4_test.cpp">
+      <Filter>cxx_math\matrix</Filter>
+    </ClCompile>
+    <ClCompile Include="quaternion_test.cpp">
+      <Filter>cxx_math\rotation</Filter>
+    </ClCompile>
+    <ClCompile Include="dual_quaternion_test.cpp">
+      <Filter>cxx_math\rotation</Filter>
+    </ClCompile>
+    <ClCompile Include="measure_test.cpp">
+      <Filter>cxx_math</Filter>
+    </ClCompile>
+    <ClCompile Include="vector2_test.cpp">
+      <Filter>cxx_math\vector</Filter>
+    </ClCompile>
+    <ClCompile Include="eular_test.cpp">
+      <Filter>cxx_math\rotation</Filter>
+    </ClCompile>
+    <ClCompile Include="vector3_test.cpp">
+      <Filter>cxx_math\vector</Filter>
+    </ClCompile>
+    <ClCompile Include="vector4_test.cpp">
+      <Filter>cxx_math\vector</Filter>
+    </ClCompile>
+    <ClCompile Include="common_test.cpp">
+      <Filter>cxx_cmn</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Natvis Include="..\include\cxx.natvis" />
+  </ItemGroup>
+</Project>

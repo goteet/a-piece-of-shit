@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+  <Type Name="cxx::vector_t&lt;*,cxx::_2&gt;">
+    <DisplayString> {{ {value} }}</DisplayString>
+    <Expand>
+      <Item Name="[x]">x</Item>
+      <Item Name="[y]">y</Item>
+    </Expand>
+  </Type>
+  <Type Name="cxx::vector_t&lt;*,cxx::_3&gt;">
+    <DisplayString> {{ {value} }}</DisplayString>
+    <Expand>
+      <Item Name="[x]">x</Item>
+      <Item Name="[y]">y</Item>
+      <Item Name="[z]">z</Item>
+    </Expand>
+  </Type>
+  <Type Name="cxx::vector_t&lt;*,cxx::_4&gt;">
+    <DisplayString> {{ {value} }}</DisplayString>
+    <Expand>
+      <Item Name="[x]">x</Item>
+      <Item Name="[y]">y</Item>
+      <Item Name="[z]">z</Item>
+      <Item Name="[w]">w</Item>
+    </Expand>
+  </Type>
+  <Type Name="cxx::matrix_t&lt;cxx::_2,cxx::_2&gt;">
+    <Expand>
+      <ExpandedItem>r,2</ExpandedItem>
+    </Expand>
+  </Type>
+  <Type Name="cxx::matrix_t&lt;cxx::_2,cxx::_3&gt;">
+    <Expand>
+      <ExpandedItem>r,2</ExpandedItem>
+    </Expand>
+  </Type>
+  <Type Name="cxx::matrix_t&lt;cxx::_3,cxx::_3&gt;">
+    <Expand>
+      <ExpandedItem>r,3</ExpandedItem>
+    </Expand>
+  </Type>
+  <Type Name="cxx::matrix_t&lt;cxx::_4,cxx::_4&gt;">
+    <Expand>
+      <ExpandedItem>r,4</ExpandedItem>
+    </Expand>
+  </Type>
+  <Type Name="cxx::color_t&lt;*,cxx::_3&gt;">
+    <DisplayString> {{ {value} }}</DisplayString>
+    <Expand>
+      <Item Name="[x]">r</Item>
+      <Item Name="[y]">g</Item>
+      <Item Name="[z]">b</Item>
+    </Expand>
+  </Type>
+  <Type Name="cxx::color_t&lt;*,cxx::_4&gt;">
+    <DisplayString> {{ {value} }}</DisplayString>
+    <Expand>
+      <Item Name="[x]">r</Item>
+      <Item Name="[y]">g</Item>
+      <Item Name="[z]">b</Item>
+      <Item Name="[w]">a</Item>
+    </Expand>
+  </Type>
+</AutoVisualizer>
