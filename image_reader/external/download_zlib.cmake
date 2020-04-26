@@ -5,7 +5,7 @@ set(zlib128_bin_dir  ${CMAKE_BINARY_DIR}/bin)
 set(zlib128_src_dir  ${CMAKE_BINARY_DIR}/src)
 ExternalProject_Add(
     zlib128_downloader
-    GIT_REPOSITORY git@github.com:madler/zlib.git
+    GIT_REPOSITORY https://github.com/madler/zlib.git
     GIT_TAG        v1.2.8
     PREFIX         ${zlib128_src_dir}
     CMAKE_ARGS
@@ -13,6 +13,7 @@ ExternalProject_Add(
 )
 
 add_library(zlib128 STATIC IMPORTED)
+file(MAKE_DIRECTORY ${zlib128_bin_dir}/include)
 set_target_properties(zlib128 PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES   ${zlib128_bin_dir}/include
     IMPORTED_LOCATION_DEBUG         ${zlib128_bin_dir}/lib/zlibstaticd.lib
