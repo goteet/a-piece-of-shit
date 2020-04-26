@@ -164,17 +164,18 @@ bool Initialize(HWND hWnd)
 		d3d9->Release();
 	}
 
-	auto start = std::chrono::high_resolution_clock::now();
+	auto start = std::chrono::steady_clock::now();
 
 #if 0
 	for (ImageLoader* file : imageFileList)
 	{
-		cxx::file_buffer f;
-		if (cxx::read_file(file->img_path.c_str(), f))
+		cxx::file_buffer& f = file->img_file;
+		if (file->load_file = cxx::read_file(file->img_path.c_str(), f))
 		{
-			image_data data;
-			if (parse_image(f.buffer_ptr(), f.length(), data))
+			image_data& data = file->img_data;
+			if (file->parse_img = parse_image(f.buffer_ptr(), f.length(), data))
 			{
+
 				IDirect3DTexture9* d3dTexture = nullptr;
 				D3DFORMAT fmt = D3DFMT_A8R8G8B8;
 				if (data.format == pixel_format::dxt1x)
@@ -363,7 +364,7 @@ bool Initialize(HWND hWnd)
 		unfinished.clear();
 	}
 #endif
-	auto end = std::chrono::high_resolution_clock::now();
+	auto end = std::chrono::steady_clock::now();
 
 	std::chrono::duration <double, std::milli> elapsedSecond = end - start;
 

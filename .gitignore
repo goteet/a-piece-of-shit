@@ -1,0 +1,8 @@
+.vs/
+[Dd]ebug/
+[Rr]elease/
+[Ii]nternal/
+[Bb]inary/
+[Bb]uild/
+*.user
+cmake/cxx-config.cmake

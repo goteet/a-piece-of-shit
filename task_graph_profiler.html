@@ -1,0 +1,160 @@
+<html>
+	<head>
+		<script src="datasource.js"></script>
+	</head>
+	<body>
+		<canvas id="main" width="1" height="1">
+		</canvas>		
+	</body>
+	<script>
+		var cavans = document.getElementById("main");
+		var context = cavans.getContext("2d");
+
+		var color_table = {}
+		var kStartOffset = 50;
+		var kMicrosecondWidth = 5;
+		var kTokenWidth = 50;
+		var kChannelCount = 5;
+		var kChannelWidth = 60;
+		var kMilliesecondCount = 10000;
+		var kGraphWidth = kMicrosecondWidth * kMilliesecondCount;
+		var kGraphHeight = kChannelWidth * kChannelCount;
+		var kChannelOffset = (kChannelWidth - kTokenWidth)/2;
+
+		var task_creation_list = datasource["task_creation"];
+		var work_thread_0_list = datasource["work_thread_0"];
+		var work_thread_1_list = datasource["work_thread_1"];
+		var work_thread_2_list = datasource["work_thread_2"];
+		var io_thread_list = datasource["io_thread"];
+
+		var latest = 0;
+		function random_color(){
+			const randomColor = Math.floor(Math.random()*16777215).toString(16);
+  			return "#" + randomColor;
+		}
+		function draw_token(list, startOffset, channel, show_task_id) {
+			for(var i = 0; i < list.length; i+=1) {
+				var entry = list[i];
+				var begin = (entry["begin"] - startOffset) * 0.001;
+				var end = (entry["end"] - startOffset) * 0.001;
+				if(latest < end)
+				{
+					latest = end;
+				}
+				var taskid = entry["taskid"];
+				var task_group = Math.floor(taskid / 2);
+
+				var left = begin * kMicrosecondWidth + kStartOffset;
+				var width = kMicrosecondWidth * (end - begin);
+				var top = channel * kChannelWidth + kChannelOffset;
+				var height = kTokenWidth;
+				context.fillStyle = color_table[task_group];
+				//alert(task_group, color_table[task_group]);
+				context.fillRect(left, top, width, kTokenWidth);
+
+				if(show_task_id) {
+					context.fillStyle = "#000000";
+					context.fillText("id=" + taskid.toString() + ", group=" + task_group.toString(), left, top + 20);
+				}
+			}
+		}
+
+		cavans.width = kGraphWidth + kStartOffset * 2;
+		cavans.height = kGraphHeight + kStartOffset* 2;
+
+		//draw grid
+		for(var i = 0; i <= kChannelCount; i+=1)
+		{
+			context.fillRect(kStartOffset, i * kChannelWidth, kGraphWidth, 1);
+		}
+		
+		context.fillStyle = "#999999";
+		for(var i = 0; i <= kMilliesecondCount; i+=1)
+		{
+			context.fillRect(kStartOffset + i * kMicrosecondWidth, 0, 1, kGraphHeight);
+		}
+		context.fillStyle = "#000000";
+		//
+
+		//generate random color 
+		for(var i = 0; i < task_creation_list.length; i+=1) {
+				var entry = task_creation_list[i];
+				var taskid = entry["taskid"];
+				color_table[taskid] = random_color();
+			}
+			
+		var startOffset = task_creation_list[0]["begin"];
+		left = 0;
+
+		context.fillText("create", 10, 35);
+		context.fillText("diskio", 10, 35 + kChannelWidth * 1);
+		context.fillText("work_0", 10, 35 + kChannelWidth * 2);
+		context.fillText("work_1", 10, 35 + kChannelWidth * 3);
+		context.fillText("work_2", 10, 35 + kChannelWidth * 4);
+
+
+		
+		draw_token(task_creation_list, startOffset, 0, false);
+
+		var start_delay_ms = (io_thread_list[0]["begin"] - startOffset)* 0.000001;
+		if(start_delay_ms  > 2)
+		{
+			var offset = startOffset = io_thread_list[0]["begin"] - latest * 1000 - start_delay_ms * 1000;
+
+			context.fillStyle = "#F0F0F0";
+			context.fillRect(kStartOffset + latest * kMicrosecondWidth, kChannelOffset, start_delay_ms * kMicrosecondWidth, kTokenWidth * 2 + kChannelOffset * 2);
+
+			context.fillStyle = "#0000ff";
+			var oldFont = context.font;
+			context.font = "20px consolas";
+			context.fillText("延迟启动了：" + start_delay_ms + " 毫秒", kStartOffset + latest * kMicrosecondWidth + 5, 30);
+			context.font = oldFont;
+		}
+		draw_token(io_thread_list, startOffset, 1    , true);
+		draw_token(work_thread_0_list, startOffset, 2, true);
+		draw_token(work_thread_1_list, startOffset, 3, true);
+		draw_token(work_thread_2_list, startOffset, 4, true);
+		
+		context.fillStyle = "#FF0000";
+		var oldFont = context.font;
+		context.font = "20px consolas";
+		context.fillText("一共耗时：" + (latest * 0.001).toString() + " msec",  kStartOffset + latest * kMicrosecondWidth, 35 + kChannelWidth * 0);
+		context.font = oldFont;
+		
+		
+
+		//for(var i = 0; i < work_thread_0_list.length; i+=1)
+		//{
+		//	var entry = work_thread_0_list[i];
+		//	var begin = entry["begin"]* 0.001;
+		//	var end = entry["end"]* 0.001;
+//
+		//	var t = begin * 2 + kStartOffset;
+		//	var b = end - begin + 1;
+		//	context.fillRect(15, t, 10, b);
+		//}
+//
+		//for(var i = 0; i < work_thread_1_list.length; i+=1)
+		//{
+		//	var entry = work_thread_1_list[i];
+		//	var begin = entry["begin"]* 0.001;
+		//	var end = entry["end"]* 0.001;
+//
+		//	var t = begin * 2 + kStartOffset;
+		//	var b = end - begin + 1;
+		//	context.fillRect(30, t, 10, b);
+		//}
+//
+		//for(var i = 0; i < work_thread_2_list.length; i+=1)
+		//{
+		//	var entry = work_thread_2_list[i];
+		//	var begin = entry["begin"]* 0.001;
+		//	var end = entry["end"]* 0.001;
+//
+		//	var t = begin * 2 + kStartOffset;
+		//	var b = end - begin + 1;
+		//	context.fillRect(45, t, 10, b);
+		//}
+
+	</script>
+</html>

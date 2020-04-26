@@ -2,6 +2,11 @@
 #include <functional>
 #include "mpmc_bounded_queue.h"
 
+//#define ENABLE_PROFILING
+#ifdef ENABLE_PROFILING
+#include <chrono>
+#endif
+
 enum class ThreadName
 {
 	DontCare,		//µÈÓÚWorkThread,
@@ -131,10 +136,18 @@ private://internal used.
 	*/
 	std::mutex mSubseuquentsMutex;
 	std::vector<GraphTask*> mSubsequents;
+
+#ifdef ENABLE_PROFILING
+private:
+	unsigned int mTaskID = 0;
+	unsigned int mResUID = 0;
+#endif
 };
 
 struct TaskScheduler
 {
+	static const int kNumWorThread = 3;
+
 	static TaskScheduler& Instance();
 
 	static void Shutdown();
@@ -143,18 +156,32 @@ public://internal use.
 	void ScheduleTask(GraphTask* task);
 
 private:
-	static const int kNumWorThread = 3;
+	struct TaskQueue
+	{
+		TaskQueue(unsigned int num) :queue(num) {}
+		mpmc_bounded_queue<GraphTask*> queue;
+		std::condition_variable qFetchWaitingCV;
+		std::mutex qFetchWaitingMutex;
+		std::atomic<int> queueLength = 0;
+		std::atomic<bool> waitingDequeue = true;
+
+		bool enqueue(GraphTask* pTask);
+
+		bool dequeue(GraphTask*& pTask);
+
+		void quit();
+	};
 	std::atomic_bool schedulerRunning = true;
 
 	std::thread diskIOThread;
 	std::thread workThreads[kNumWorThread];
 
-	mpmc_bounded_queue<GraphTask*> diskIOThreadTaskQueue;
-	mpmc_bounded_queue<GraphTask*> workThreadTaskQueue;
+	TaskQueue diskIOThreadTaskQueue;
+	TaskQueue workThreadTaskQueue;
 
 	TaskScheduler();
 
-	void TaskThreadRoute(mpmc_bounded_queue<GraphTask*>* queue);
+	void TaskThreadRoute(TaskQueue* queue, ThreadName name, unsigned int index);
 
 	void Join();
 };

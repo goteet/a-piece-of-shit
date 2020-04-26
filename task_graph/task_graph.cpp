@@ -5,6 +5,137 @@
 #include <Windows.h>
 #endif
 
+
+#ifdef ENABLE_PROFILING
+#include <ctime>
+
+namespace
+{
+	std::atomic<int> sResourceUIDGenerator = 0;
+	std::atomic<int> sTaskIDGenerator = 0;
+	std::chrono::time_point<std::chrono::steady_clock> sStartTimeStamp;
+
+	enum TaskTokenType
+	{
+		Create,
+		Execute,
+		Recycle
+	};
+
+	struct TaskProfilerToken
+	{
+		TaskProfilerToken() = default;
+		
+		TaskTokenType	TokenType = Create;
+		ThreadName		ThreadName = ThreadName::WorkThread;
+		unsigned int	ThreadIndex = 0;
+		unsigned int	TaskID = 0;
+		unsigned int	ResUID = 0;
+		long long		BeginTimeStamp = 0;
+		long long		EndTimeStamp = 0;
+
+	};
+
+	//mpmc_bounded_queue<TaskProfilerToken> TaskCreateInfos(4096);
+	std::vector<TaskProfilerToken> TaskCreateInfos;
+	std::vector<TaskProfilerToken> DiskIORunningInfos;
+	std::vector<TaskProfilerToken> WorkerTaskRunningInfos[TaskScheduler::kNumWorThread];
+
+	void OutputTokenList(std::string& outString, const std::vector<TaskProfilerToken>& list)
+	{
+		int index = 0;
+		for (const TaskProfilerToken& token : list)
+		{
+			outString += "\t\t{\n";
+			{
+				//type
+				outString += "\t\t\t\"type\":";
+				switch (token.TokenType)
+				{
+				default:		outString += R"("Unknown",)""\n"; break;
+				case Create:	outString += R"("Create",)""\n"; break;
+				case Execute:	outString += R"("Execute",)""\n"; break;
+				case Recycle:	outString += R"("Recycle",)""\n"; break;
+				}
+
+				//timestamp
+				char buff[128];
+				outString += "\t\t\t\"begin\":";
+				outString += itoa((unsigned long)token.BeginTimeStamp, buff, 10);
+				outString += ",\n";
+
+				outString += "\t\t\t\"end\":";
+				outString += itoa((unsigned long)token.EndTimeStamp, buff, 10);
+				outString += ",\n";
+
+				//task id
+				outString += "\t\t\t\"taskid\":";
+				outString += itoa(token.TaskID, buff, 10);
+				outString += ",\n";
+
+				//resourceid
+				outString += "\t\t\t\"resourceid\":";
+				outString += itoa(token.ResUID, buff, 10);
+				outString += "\n";
+			}
+			outString += "\t\t}";
+			if (++index != list.size())
+			{
+				outString += ",\n";
+			}
+			else
+			{
+				outString += "\n";
+			}
+		}
+	}
+
+	void OutputProfilingDatas()
+	{
+		std::string outputstring = "{\n";
+		outputstring += R"(	"task_creation":[)""\n";
+		OutputTokenList(outputstring, TaskCreateInfos);
+		outputstring += R"(	],)""\n";
+
+		char buff[4];
+		for (int i = 0; i < TaskScheduler::kNumWorThread; i += 1)
+		{	
+			outputstring += R"(	"work_thread_)";
+			outputstring += itoa(i,buff, 10);
+			outputstring += "\":[\n";
+			OutputTokenList(outputstring, WorkerTaskRunningInfos[i]);
+			outputstring += R"(	],)""\n";
+		}
+
+		outputstring += R"(	"io_thread":[)""\n";
+		OutputTokenList(outputstring, DiskIORunningInfos);
+		outputstring += R"(	])""\n";
+		outputstring += "}\n";
+
+		time_t currentTime;
+		time(&currentTime);
+		tm* time = localtime(&currentTime);
+
+		char fileNameBuff[256];
+		sprintf(fileNameBuff, "profile_%d_%d_%d_%d_%d_%d.txt"
+			, time->tm_year
+			, time->tm_mon
+			, time->tm_mday
+			, time->tm_hour
+			, time->tm_min
+			, time->tm_sec);
+
+		FILE* f = fopen(fileNameBuff, "w+");
+		if (f)
+		{
+			fwrite(outputstring.c_str(), 1, outputstring.size(), f);
+
+			fclose(f);
+		}
+	}
+}
+#endif
+
 const int kMaxTaskCount = 0x100000;
 mpmc_bounded_queue<GraphTask*> GraphTask::sFactoryPool(kMaxTaskCount);
 
@@ -99,9 +230,19 @@ bool GraphTask::DontCompleteUntil(GraphTask * task)
 	return false;
 }
 
+
 GraphTask * GraphTask::StartTask(ThreadName name, std::function<TaskRoute>&& taskRoute, GraphTask ** pPrerequistes, unsigned int prerequisteCount)
 {
 	GraphTask* newTask = nullptr;
+
+#ifdef ENABLE_PROFILING
+	TaskProfilerToken token;
+	//这不是真的就是了，现在没有参数
+	token.ThreadName = ThreadName::MainThread;
+	token.TokenType = TaskTokenType::Create;
+	token.BeginTimeStamp = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sStartTimeStamp).count();
+#endif
+
 	if (sFactoryPool.dequeue(newTask))
 	{
 		newTask->mThreadName = name;
@@ -116,7 +257,17 @@ GraphTask * GraphTask::StartTask(ThreadName name, std::function<TaskRoute>&& tas
 	else
 	{
 		newTask = new GraphTask(name, std::move(taskRoute));
+#ifdef ENABLE_PROFILING
+		newTask->mResUID = sResourceUIDGenerator.fetch_add(1,std::memory_order_acquire);
+		token.ResUID = newTask->mResUID;
+		
+#endif
 	}
+
+#ifdef ENABLE_PROFILING
+	newTask->mTaskID = sTaskIDGenerator.fetch_add(1, std::memory_order_acquire);
+	token.TaskID = newTask->mTaskID;
+#endif
 
 	if (pPrerequistes && prerequisteCount > 0)
 	{
@@ -125,6 +276,11 @@ GraphTask * GraphTask::StartTask(ThreadName name, std::function<TaskRoute>&& tas
 			pPrerequistes[i]->AddSubsequent(newTask);
 		}
 	}
+
+#ifdef ENABLE_PROFILING
+	token.EndTimeStamp = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sStartTimeStamp).count();
+	TaskCreateInfos.push_back(token);
+#endif
 	newTask->ScheduleMe();
 	return newTask;
 }
@@ -171,6 +327,7 @@ void GraphTask::SpinJoin()
 
 void GraphTask::Execute()
 {
+
 	//执行 Route
 	{
 		Task taskWrapper(this);
@@ -384,6 +541,11 @@ void TaskScheduler::Shutdown()
 	Instance().schedulerRunning.store(false, std::memory_order_release);
 	Instance().Join();
 	GraphTask::ReleaseCacheTasks();
+
+#ifdef ENABLE_PROFILING
+	//output profiling datas.
+	OutputProfilingDatas();
+#endif
 }
 
 //internal use.
@@ -417,23 +579,27 @@ TaskScheduler::TaskScheduler()
 	: diskIOThreadTaskQueue(kMaxTaskCount)
 	, workThreadTaskQueue(kMaxTaskCount)
 {
+#ifdef	ENABLE_PROFILING
+	sStartTimeStamp = std::chrono::steady_clock::now();
+#endif
+
 	for (size_t i = 0; i < kNumWorThread; i += 1)
 	{
-		workThreads[i] = std::thread(&TaskScheduler::TaskThreadRoute, this, &workThreadTaskQueue);
+		workThreads[i] = std::thread(&TaskScheduler::TaskThreadRoute, this, &workThreadTaskQueue, ThreadName::WorkThread, i);
 
 #ifdef WIN32
-		SetThreadAffinityMask(workThreads[i].native_handle(), 0x4 << i);
+		SetThreadAffinityMask(workThreads[i].native_handle(), 0x4 << (i*2));
 #endif
 	}
 
-	diskIOThread = std::thread(&TaskScheduler::TaskThreadRoute, this, &diskIOThreadTaskQueue);
+	diskIOThread = std::thread(&TaskScheduler::TaskThreadRoute, this, &diskIOThreadTaskQueue, ThreadName::DiskIOThread, 0);
 
 #ifdef WIN32
 	SetThreadAffinityMask(diskIOThread.native_handle(), 0x2);
 #endif
 }
 
-void TaskScheduler::TaskThreadRoute(mpmc_bounded_queue<GraphTask*>* queue)
+void TaskScheduler::TaskThreadRoute(TaskQueue* queue, ThreadName threadName, unsigned int index)
 {
 	GraphTask* task = nullptr;
 	bool fetchedTask = (fetchedTask = queue->dequeue(task));
@@ -441,14 +607,32 @@ void TaskScheduler::TaskThreadRoute(mpmc_bounded_queue<GraphTask*>* queue)
 	{
 		if (fetchedTask)
 		{
-			//std::stringstream ss;
-			//ss << std::this_thread::get_id();
-			//std::string threadID = ss.str();
-			//print_("[thread_%s]:", threadID.c_str());
+#ifdef ENABLE_PROFILING
+			TaskProfilerToken token;
+			//这不是真的就是了，现在没有参数
+			token.ThreadName = threadName;
+			token.ThreadIndex = index;
+			token.TokenType = TaskTokenType::Execute;
+			token.BeginTimeStamp = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sStartTimeStamp).count();
+			token.TaskID = task->mTaskID;
+			token.ResUID = task->mResUID;
+#endif
 			task->Execute();
 
+#ifdef ENABLE_PROFILING
+			token.EndTimeStamp = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sStartTimeStamp).count();
+			if (threadName == ThreadName::DiskIOThread)
+			{
+				DiskIORunningInfos.push_back(token);
+			}
+			else
+			{
+				WorkerTaskRunningInfos[index].push_back(token);
+			}
+#endif
+
 		}
-		
+
 		fetchedTask = queue->dequeue(task);
 		//这个循环可以不用一直循环
 		//通过event通知/挂起会节省很多空循环
@@ -459,10 +643,55 @@ void TaskScheduler::TaskThreadRoute(mpmc_bounded_queue<GraphTask*>* queue)
 
 void TaskScheduler::Join()
 {
+	diskIOThreadTaskQueue.quit();
+	workThreadTaskQueue.quit();
 	for (std::thread& t : workThreads)
 	{
 		t.join();
 	}
 	diskIOThread.join();
 
+}
+
+bool TaskScheduler::TaskQueue::enqueue(GraphTask * pTask)
+{
+	if (queue.enqueue(pTask))
+	{
+		//if (0 == queueLength.fetch_add(1, std::memory_order_release))
+		//{
+		//	//qFetchWaitingCV.notify_one();
+		//}
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+void TaskScheduler::TaskQueue::quit()
+{
+	waitingDequeue.store(false,std::memory_order_release);
+	//qFetchWaitingCV.notify_all();
+}
+
+bool TaskScheduler::TaskQueue::dequeue(GraphTask *& pTask)
+{
+	return queue.dequeue(pTask);
+	//bool r;
+	//while (!(r = queue.dequeue(pTask)) && waitingDequeue.load(std::memory_order_acquire))
+	//{
+	//	//std::unique_lock<std::mutex> lk(qFetchWaitingMutex);
+	//	//qFetchWaitingCV.wait(lk);
+	//}
+	//
+	//if (r)
+	//{
+	//	queueLength.fetch_sub(1, std::memory_order_release);
+	//	return true;
+	//}
+	//else
+	//{
+	//	return false;
+	//}
 }
