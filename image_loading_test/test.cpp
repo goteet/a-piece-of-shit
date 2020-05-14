@@ -6,6 +6,7 @@
 #include <time.h>
 #include <vector>
 #include <string>
+#include <sstream>
 #include "image.h"
 #include "cxx_file.h"
 #include <chrono>
@@ -68,9 +69,19 @@ void CenterWindow(HWND hWnd, int width, int height)
 		width, height,
 		SWP_SHOWWINDOW);
 }
-
 void NextImage()
 {
+	//用来测试能拉起work thread的代码
+	/*
+	Task::StartTask(ThreadName::WorkThread, [](Task&) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+		std::stringstream ostre;
+		ostre << std::this_thread::get_id();
+		std::string x = ostre.str();
+		::MessageBoxA(NULL, x.c_str(), NULL, MB_OK);
+	});
+	*/
+
 	currentTexture = (currentTexture + 1) % textures.size();
 	CenterWindow(hWindow, textures[currentTexture].width, textures[currentTexture].height);
 	::SetWindowTextA(hWindow, textures[currentTexture].name.c_str());
@@ -357,7 +368,18 @@ bool Initialize(HWND hWnd)
 					assert(false);
 					throw;
 				}
-				delete file;
+
+				file->firstTask = Task::StartTask(ThreadName::DiskIOThread, [file](Task&) {
+					file->load_file = cxx::read_file(file->img_path.c_str(), file->img_file);
+				});
+				file->finalTask = file->firstTask.ContinueWith(ThreadName::WorkThread, [file](Task&) {
+					if (file->img_file)
+					{
+						file->parse_img = parse_image(file->img_file.buffer_ptr(), file->img_file.length(), file->img_data);
+					}
+
+					delete file;
+				});
 			}
 		}
 		imageFileList.swap(unfinished);

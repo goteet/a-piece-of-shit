@@ -99,7 +99,7 @@
 		var start_delay_ms = (io_thread_list[0]["begin"] - startOffset)* 0.000001;
 		if(start_delay_ms  > 2)
 		{
-			var offset = startOffset = io_thread_list[0]["begin"] - latest * 1000 - start_delay_ms * 1000;
+			var offset = startOffset = io_thread_list[0]["begin"] - start_delay_ms * 1000;
 
 			context.fillStyle = "#F0F0F0";
 			context.fillRect(kStartOffset + latest * kMicrosecondWidth, kChannelOffset, start_delay_ms * kMicrosecondWidth, kTokenWidth * 2 + kChannelOffset * 2);

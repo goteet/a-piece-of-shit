@@ -2,7 +2,7 @@
 #include <functional>
 #include "mpmc_bounded_queue.h"
 
-//#define ENABLE_PROFILING
+#define ENABLE_PROFILING
 #ifdef ENABLE_PROFILING
 #include <chrono>
 #endif
@@ -159,17 +159,21 @@ private:
 	struct TaskQueue
 	{
 		TaskQueue(unsigned int num) :queue(num) {}
-		mpmc_bounded_queue<GraphTask*> queue;
-		std::condition_variable qFetchWaitingCV;
-		std::mutex qFetchWaitingMutex;
-		std::atomic<int> queueLength = 0;
-		std::atomic<bool> waitingDequeue = true;
 
-		bool enqueue(GraphTask* pTask);
+		bool enqueue(GraphTask* pTask); 
 
 		bool dequeue(GraphTask*& pTask);
 
 		void quit();
+
+	private:
+		mpmc_bounded_queue<GraphTask*> queue;
+		std::atomic<bool> spin_waiting = true;
+		std::atomic<int> num_tasks = 0;
+		std::atomic<int> num_waiting_threads = 0;
+		std::condition_variable queue_cv;
+		std::mutex queue_mtx;
+
 	};
 	std::atomic_bool schedulerRunning = true;
 

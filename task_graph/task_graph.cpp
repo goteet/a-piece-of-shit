@@ -25,7 +25,7 @@ namespace
 	struct TaskProfilerToken
 	{
 		TaskProfilerToken() = default;
-		
+
 		TaskTokenType	TokenType = Create;
 		ThreadName		ThreadName = ThreadName::WorkThread;
 		unsigned int	ThreadIndex = 0;
@@ -68,6 +68,7 @@ namespace
 				outString += itoa((unsigned long)token.EndTimeStamp, buff, 10);
 				outString += ",\n";
 
+
 				//task id
 				outString += "\t\t\t\"taskid\":";
 				outString += itoa(token.TaskID, buff, 10);
@@ -92,16 +93,16 @@ namespace
 
 	void OutputProfilingDatas()
 	{
-		std::string outputstring = "{\n";
+		std::string outputstring = "var datasource = {\n";
 		outputstring += R"(	"task_creation":[)""\n";
 		OutputTokenList(outputstring, TaskCreateInfos);
 		outputstring += R"(	],)""\n";
 
 		char buff[4];
 		for (int i = 0; i < TaskScheduler::kNumWorThread; i += 1)
-		{	
+		{
 			outputstring += R"(	"work_thread_)";
-			outputstring += itoa(i,buff, 10);
+			outputstring += itoa(i, buff, 10);
 			outputstring += "\":[\n";
 			OutputTokenList(outputstring, WorkerTaskRunningInfos[i]);
 			outputstring += R"(	],)""\n";
@@ -258,9 +259,9 @@ GraphTask * GraphTask::StartTask(ThreadName name, std::function<TaskRoute>&& tas
 	{
 		newTask = new GraphTask(name, std::move(taskRoute));
 #ifdef ENABLE_PROFILING
-		newTask->mResUID = sResourceUIDGenerator.fetch_add(1,std::memory_order_acquire);
+		newTask->mResUID = sResourceUIDGenerator.fetch_add(1, std::memory_order_acquire);
 		token.ResUID = newTask->mResUID;
-		
+
 #endif
 	}
 
@@ -588,7 +589,7 @@ TaskScheduler::TaskScheduler()
 		workThreads[i] = std::thread(&TaskScheduler::TaskThreadRoute, this, &workThreadTaskQueue, ThreadName::WorkThread, i);
 
 #ifdef WIN32
-		SetThreadAffinityMask(workThreads[i].native_handle(), 0x4 << (i*2));
+		SetThreadAffinityMask(workThreads[i].native_handle(), 0x4 << (i * 2));
 #endif
 	}
 
@@ -657,10 +658,12 @@ bool TaskScheduler::TaskQueue::enqueue(GraphTask * pTask)
 {
 	if (queue.enqueue(pTask))
 	{
-		//if (0 == queueLength.fetch_add(1, std::memory_order_release))
-		//{
-		//	//qFetchWaitingCV.notify_one();
-		//}
+		num_tasks.fetch_add(1, std::memory_order_release);
+		if(num_waiting_threads.load(std::memory_order_acquire))
+		{
+			std::unique_lock<std::mutex> lk(queue_mtx);
+			queue_cv.notify_one();
+		}
 		return true;
 	}
 	else
@@ -671,27 +674,27 @@ bool TaskScheduler::TaskQueue::enqueue(GraphTask * pTask)
 
 void TaskScheduler::TaskQueue::quit()
 {
-	waitingDequeue.store(false,std::memory_order_release);
-	//qFetchWaitingCV.notify_all();
+	spin_waiting.store(false, std::memory_order_release);
+	std::unique_lock<std::mutex> lk(queue_mtx);
+	queue_cv.notify_all();
 }
 
 bool TaskScheduler::TaskQueue::dequeue(GraphTask *& pTask)
 {
-	return queue.dequeue(pTask);
-	//bool r;
-	//while (!(r = queue.dequeue(pTask)) && waitingDequeue.load(std::memory_order_acquire))
-	//{
-	//	//std::unique_lock<std::mutex> lk(qFetchWaitingMutex);
-	//	//qFetchWaitingCV.wait(lk);
-	//}
-	//
-	//if (r)
-	//{
-	//	queueLength.fetch_sub(1, std::memory_order_release);
-	//	return true;
-	//}
-	//else
-	//{
-	//	return false;
-	//}
+	while (spin_waiting.load(std::memory_order_acquire))
+	{
+		num_waiting_threads.fetch_add(1, std::memory_order_release);
+		std::unique_lock<std::mutex> lk(queue_mtx);
+		queue_cv.wait(lk, [&] {
+			return !spin_waiting.load(std::memory_order_acquire) ||
+				num_tasks.load(std::memory_order_acquire) != 0;
+		});
+		num_waiting_threads.fetch_sub(1, std::memory_order_release);
+		if (queue.dequeue(pTask))
+		{
+			num_tasks.fetch_sub(1, std::memory_order_release);
+			return true;
+		}
+	}
+	return false;
 }

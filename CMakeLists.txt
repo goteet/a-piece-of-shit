@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.12)
 #这是有一个总入口，把所有零散的项目组在一起而已
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
-project(a-piece-of-trash)
+project(a-piece-of-shift)
 
 add_subdirectory(task_graph task_graph_demo)
 add_subdirectory(cxx_utilities)
