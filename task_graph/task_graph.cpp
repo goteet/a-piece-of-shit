@@ -151,7 +151,7 @@ void GraphTask::ScheduleMe()
 	{
 		assert(!IsFinished() && !IsRecycled() && !IsAvailable());
 
-		if (mAntecedentDependencyCount.fetch_sub(1) == 1)
+		if (mAntecedentDependencyCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
 		{
 			TaskScheduler::Instance().ScheduleTask(this);
 		}
@@ -232,7 +232,7 @@ bool GraphTask::DontCompleteUntil(GraphTask * task)
 }
 
 
-GraphTask * GraphTask::StartTask(ThreadName name, std::function<TaskRoute>&& taskRoute, GraphTask ** pPrerequistes, unsigned int prerequisteCount)
+GraphTask * GraphTask::StartTask(ThreadName name, std::function<TaskRoute>&& taskRoute, GraphTask** pPrerequistes, unsigned int prerequisteCount)
 {
 	GraphTask* newTask = nullptr;
 
@@ -406,7 +406,11 @@ bool GraphTask::AddSubsequent(GraphTask * pNextTask)
 		if (!IsFinished())
 		{
 			std::lock_guard<std::mutex> guard(mSubseuquentsMutex);
-			pNextTask->mAntecedentDependencyCount.fetch_add(1);
+			/** 
+			* 如果next已经开始调度，这里就会出错。导致next被调度两次。
+			* 所以add Subsequents 不能被外部调用。
+			*/
+			pNextTask->mAntecedentDependencyCount.fetch_add(1, std::memory_order_acq_rel);
 			mSubsequents.push_back(pNextTask);
 			return true;
 		}
@@ -415,11 +419,24 @@ bool GraphTask::AddSubsequent(GraphTask * pNextTask)
 }
 
 //user interface.
-Task Task::StartTask(ThreadName name, std::function<TaskRoute> routine, GraphTask ** pPrerequistes, unsigned int prerequisteCount)
+Task Task::StartTask(ThreadName name, std::function<TaskRoute> routine, Task* pPrerequistes, unsigned int prerequisteCount)
 {
+	//能把 Task 传进来说明，Task还是引用着GraphTask的。
+	std::vector<GraphTask*> taskList;
+	GraphTask** pPrerequistesPtr = nullptr;
+	if (pPrerequistes != nullptr && prerequisteCount > 0)
+	{
+		taskList.reserve(prerequisteCount);
+		for (unsigned int i = 0; i < prerequisteCount; i += 1)
+		{
+			taskList.push_back(pPrerequistes[i].mTaskPtr);
+		}
+		pPrerequistesPtr = &(taskList[0]);
+	}
+
 	//程序启动时，为了防止运行到这一步之前，task完成之后就回收。
-	//默认 reference = 2; 在Task 构造函数内会有reference增加的操作
-	Task taskWrapper(GraphTask::StartTask(name, std::move(routine), pPrerequistes, prerequisteCount));
+	//默认 reference = 2; 在 Task 构造函数内会有reference增加的操作
+	Task taskWrapper(GraphTask::StartTask(name, std::move(routine), pPrerequistesPtr, prerequisteCount));
 	//所以这里可以把构造时的第二个引用去掉了。
 	taskWrapper.mTaskPtr->Release();
 	return taskWrapper;

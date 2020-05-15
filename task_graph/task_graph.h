@@ -30,7 +30,7 @@ typedef void (TaskRoute)(Task&);
 struct Task
 {
 	//user interface.
-	static Task StartTask(ThreadName name, std::function<TaskRoute> routine, GraphTask** pPrerequistes = nullptr, unsigned int prerequisteCount = 0);
+	static Task StartTask(ThreadName name, std::function<TaskRoute> routine, Task* pPrerequistes = nullptr, unsigned int prerequisteCount = 0);
 
 	Task ContinueWith(ThreadName name, std::function<TaskRoute>&& routine);
 
@@ -105,6 +105,11 @@ private://internal used.
 
 	void NotifySubsequents();
 
+	/**
+	* 逻辑没有保证 pNextTask 是未完成的状态
+	* 有可能在加入的过程中被scheduling了。
+	* 所以不能提供给外部调用，现在支持在创建的时候传入
+	*/
 	bool AddSubsequent(GraphTask* pNextTask);
 
 	void ScheduleMe();
