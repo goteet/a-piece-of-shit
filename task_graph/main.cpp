@@ -50,21 +50,21 @@ int main()
 
 	for (IOParam& param : graphs)
 	{
-		param.finalTask = Task::StartTask(ThreadName::DiskIOThread, [&](Task& thisTask) {
+		param.finalTask = Task::Start(ThreadName::DiskIOThread, [&](Task& thisTask) {
 			print_("%x:hello world\n", (unsigned int)&param);
 			sleep_for_milliseconds(500);
 			param.i += 1;
-		}).ContinueWith(ThreadName::WorkThread_Debug0, [&](Task thisTask) {
+		}).Then(ThreadName::WorkThread, [&](Task thisTask) {
 			print_("%x:hi too\n", (unsigned int)&param);
 			sleep_for_milliseconds(1200);
 			param.i += 1;
-		}).ContinueWith(ThreadName::WorkThread_Debug1, [&](Task thisTask) {
+		}).Then(ThreadName::WorkThread, [&](Task thisTask) {
 			sleep_for_milliseconds(800);
 			param.i += 1;
 
 			for (int j = 0; j < 5; j += 1)
 			{
-				Task depTask = Task::StartTask(ThreadName::WorkThread_Debug2, [&param, j](Task& thisTask) {
+				Task depTask = Task::Start(ThreadName::WorkThread, [&param, j](Task& thisTask) {
 					print_(" dont complete until this:%d\n", j);
 					sleep_for_milliseconds(300);
 					param.i.fetch_add(1);
@@ -72,7 +72,7 @@ int main()
 
 				thisTask.DontCompleteUntil(depTask);
 			}
-		}).ContinueWith(ThreadName::WorkThread_Debug3, [&param, i](Task& thisTask) {
+		}).Then(ThreadName::WorkThread, [&param, i](Task& thisTask) {
 			print_("%x:done:0x%x.\n", (unsigned int)&param, i);
 		});
 

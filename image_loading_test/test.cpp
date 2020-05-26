@@ -266,10 +266,10 @@ bool Initialize(HWND hWnd)
 #else
 	for (ImageLoader* file : imageFileList)
 	{
-		file->firstTask = Task::StartTask(ThreadName::DiskIOThread, [file](Task&) {
+		file->firstTask = Task::Start(ThreadName::DiskIOThread, [file](Task&) {
 			file->load_file = cxx::read_file(file->img_path.c_str(), file->img_file);
 		});
-		file->finalTask = file->firstTask.ContinueWith(ThreadName::WorkThread, [file](Task&) {
+		file->finalTask = file->firstTask.Then(ThreadName::WorkThread, [file](Task&) {
 			if (file->img_file)
 			{
 				file->parse_img = parse_image(file->img_file.buffer_ptr(), file->img_file.length(), file->img_data);
@@ -369,10 +369,10 @@ bool Initialize(HWND hWnd)
 					throw;
 				}
 
-				file->firstTask = Task::StartTask(ThreadName::DiskIOThread, [file](Task&) {
+				file->firstTask = Task::Start(ThreadName::DiskIOThread, [file](Task&) {
 					file->load_file = cxx::read_file(file->img_path.c_str(), file->img_file);
 				});
-				file->finalTask = file->firstTask.ContinueWith(ThreadName::WorkThread, [file](Task&) {
+				file->finalTask = file->firstTask.Then(ThreadName::WorkThread, [file](Task&) {
 					if (file->img_file)
 					{
 						file->parse_img = parse_image(file->img_file.buffer_ptr(), file->img_file.length(), file->img_data);

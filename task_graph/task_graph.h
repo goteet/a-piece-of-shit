@@ -2,24 +2,30 @@
 #include <functional>
 #include "mpmc_bounded_queue.h"
 
-#define ENABLE_PROFILING
+//#define ENABLE_PROFILING
 #ifdef ENABLE_PROFILING
 #include <chrono>
 #endif
 
+enum class TaskPriority
+{
+	High,
+	Normal,
+	Low,	//with locked queue
+};
+
 enum class ThreadName
 {
-	DontCare,		//等于WorkThread,
 	WorkThread,		//独立的用于执行task的线程
-	MainThread,		//现在这个没支持，这两个线程的exection可能需要维持在一定时间内，通过 fiber 让出时间片?
-	RenderThread,	//主要是提供给d3d填充资源之类的，不过现在没支持
 	DiskIOThread,	//读文件用的
 
+#ifdef ENABLE_PROFILING
 	WorkThread_Debug0,
 	WorkThread_Debug1,
 	WorkThread_Debug2,
 	WorkThread_Debug3,
 	WorkThread_Debug_Empty,
+#endif
 };
 
 struct GraphTask;
@@ -30,9 +36,11 @@ typedef void (TaskRoute)(Task&);
 struct Task
 {
 	//user interface.
-	static Task StartTask(ThreadName name, std::function<TaskRoute> routine, Task* pPrerequistes = nullptr, unsigned int prerequisteCount = 0);
+	static Task Start(ThreadName name, std::function<TaskRoute> route);
 
-	Task ContinueWith(ThreadName name, std::function<TaskRoute>&& routine);
+	static Task WhenAll(ThreadName name, std::function<TaskRoute> route, Task* pPrerequistes, unsigned int prerequisteCount);
+
+	Task Then(ThreadName name, std::function<TaskRoute>&& route);
 
 	bool DontCompleteUntil(Task task);
 
@@ -74,7 +82,7 @@ struct GraphTask
 	//user interface.
 	bool DontCompleteUntil(GraphTask* task);
 
-	static GraphTask* StartTask(ThreadName name, std::function<TaskRoute>&& routine, GraphTask** pPrerequistes = NULL, unsigned int prerequisteCount = 0);
+	static GraphTask* StartTask(ThreadName name, std::function<TaskRoute>&& route, GraphTask** pPrerequistes = NULL, unsigned int prerequisteCount = 0, TaskPriority prior = TaskPriority::Normal);
 
 	static void FreeTask(GraphTask* pTask);
 
@@ -82,7 +90,7 @@ struct GraphTask
 
 	virtual ~GraphTask() = default;
 
-	GraphTask* ContinueWith(ThreadName name, std::function<TaskRoute>&& routine);
+	GraphTask* ContinueWith(ThreadName name, std::function<TaskRoute>&& route, TaskPriority prior = TaskPriority::Normal);
 
 	void SpinJoin();
 
@@ -101,7 +109,9 @@ private://internal used.
 
 	ThreadName DesireExecutionOn() const { return mThreadName; }
 
-	GraphTask(ThreadName name, std::function<TaskRoute>&& routine);
+	TaskPriority DesireExecutionPriority() const { return mPriority; }
+
+	GraphTask(ThreadName name, TaskPriority prior, std::function<TaskRoute>&& route);
 
 	void NotifySubsequents();
 
@@ -123,6 +133,7 @@ private://internal used.
 	static mpmc_bounded_queue<GraphTask*> sFactoryPool;
 
 	ThreadName mThreadName = ThreadName::WorkThread;
+	TaskPriority mPriority = TaskPriority::Normal;
 	std::atomic<bool> mFinished = false;
 	std::atomic<bool> mRecycled = false;
 	std::atomic<bool> mDontCompleteUntil = false;
@@ -163,22 +174,25 @@ public://internal use.
 private:
 	struct TaskQueue
 	{
-		TaskQueue(unsigned int num) :queue(num) {}
+		TaskQueue(unsigned int num);
 
-		bool enqueue(GraphTask* pTask); 
+		bool enqueue(GraphTask* pTask);
 
 		bool dequeue(GraphTask*& pTask);
 
 		void quit();
 
 	private:
-		mpmc_bounded_queue<GraphTask*> queue;
+		mpmc_bounded_queue<GraphTask*> queueH;
+		mpmc_bounded_queue<GraphTask*> queueN;
+		std::vector<GraphTask*> queueL;
+
 		std::atomic<bool> spin_waiting = true;
 		std::atomic<int> num_tasks = 0;
 		std::atomic<int> num_waiting_threads = 0;
 		std::condition_variable queue_cv;
 		std::mutex queue_mtx;
-
+		std::mutex queue_low_mtx;
 	};
 	std::atomic_bool schedulerRunning = true;
 

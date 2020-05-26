@@ -198,8 +198,9 @@ bool GraphTask::DontCompleteUntil(GraphTask * task)
 		//直接使用调用 TryRelease 来释放资源方便点
 		AddReference();
 
-		mDontCompleteUntilEmptyTask = ContinueWith(ThreadName::WorkThread_Debug_Empty,
-			[](Task& thisTask) {}
+		mDontCompleteUntilEmptyTask = ContinueWith(ThreadName::WorkThread
+			, [](Task& thisTask) {}
+			, TaskPriority::High			
 		);
 
 		//把后续任务加入队列，这里加锁是为了
@@ -232,14 +233,14 @@ bool GraphTask::DontCompleteUntil(GraphTask * task)
 }
 
 
-GraphTask * GraphTask::StartTask(ThreadName name, std::function<TaskRoute>&& taskRoute, GraphTask** pPrerequistes, unsigned int prerequisteCount)
+GraphTask * GraphTask::StartTask(ThreadName name, std::function<TaskRoute>&& taskRoute, GraphTask** pPrerequistes, unsigned int prerequisteCount, TaskPriority prior)
 {
 	GraphTask* newTask = nullptr;
 
 #ifdef ENABLE_PROFILING
 	TaskProfilerToken token;
 	//这不是真的就是了，现在没有参数
-	token.ThreadName = ThreadName::MainThread;
+	token.ThreadName = ThreadName::WorkThread;
 	token.TokenType = TaskTokenType::Create;
 	token.BeginTimeStamp = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sStartTimeStamp).count();
 #endif
@@ -247,6 +248,7 @@ GraphTask * GraphTask::StartTask(ThreadName name, std::function<TaskRoute>&& tas
 	if (sFactoryPool.dequeue(newTask))
 	{
 		newTask->mThreadName = name;
+		newTask->mPriority = prior;
 		newTask->mTaskRoute = std::move(taskRoute);
 		newTask->mReferenceCount.store(2, std::memory_order_release);
 		newTask->mFinished.store(false, std::memory_order_release);
@@ -257,7 +259,7 @@ GraphTask * GraphTask::StartTask(ThreadName name, std::function<TaskRoute>&& tas
 	}
 	else
 	{
-		newTask = new GraphTask(name, std::move(taskRoute));
+		newTask = new GraphTask(name, prior, std::move(taskRoute));
 #ifdef ENABLE_PROFILING
 		newTask->mResUID = sResourceUIDGenerator.fetch_add(1, std::memory_order_acquire);
 		token.ResUID = newTask->mResUID;
@@ -312,10 +314,10 @@ void GraphTask::ReleaseCacheTasks()
 	}
 }
 
-GraphTask * GraphTask::ContinueWith(ThreadName name, std::function<TaskRoute>&& routine)
+GraphTask * GraphTask::ContinueWith(ThreadName name, std::function<TaskRoute>&& route, TaskPriority prior)
 {
 	GraphTask* task = this;
-	return StartTask(name, std::move(routine), &task, 1);
+	return StartTask(name, std::move(route), &task, 1, prior);
 }
 
 void GraphTask::SpinJoin()
@@ -371,8 +373,9 @@ bool GraphTask::IsAvailable() const
 	return mAntecedentDependencyCount.load(std::memory_order_acquire) == 0;
 }
 
-GraphTask::GraphTask(ThreadName name, std::function<TaskRoute>&& taskRoute)
+GraphTask::GraphTask(ThreadName name, TaskPriority prior, std::function<TaskRoute>&& taskRoute)
 	: mThreadName(name)
+	, mPriority(prior)
 	, mTaskRoute(taskRoute)
 {
 
@@ -418,8 +421,13 @@ bool GraphTask::AddSubsequent(GraphTask * pNextTask)
 	return false;
 }
 
+Task Task::Start(ThreadName name, std::function<TaskRoute> route)
+{
+	return WhenAll(name, route, nullptr, 0);
+}
+
 //user interface.
-Task Task::StartTask(ThreadName name, std::function<TaskRoute> routine, Task* pPrerequistes, unsigned int prerequisteCount)
+Task Task::WhenAll(ThreadName name, std::function<TaskRoute> route, Task* pPrerequistes, unsigned int prerequisteCount)
 {
 	//能把 Task 传进来说明，Task还是引用着GraphTask的。
 	std::vector<GraphTask*> taskList;
@@ -436,19 +444,19 @@ Task Task::StartTask(ThreadName name, std::function<TaskRoute> routine, Task* pP
 
 	//程序启动时，为了防止运行到这一步之前，task完成之后就回收。
 	//默认 reference = 2; 在 Task 构造函数内会有reference增加的操作
-	Task taskWrapper(GraphTask::StartTask(name, std::move(routine), pPrerequistesPtr, prerequisteCount));
+	Task taskWrapper(GraphTask::StartTask(name, std::move(route), pPrerequistesPtr, prerequisteCount));
 	//所以这里可以把构造时的第二个引用去掉了。
 	taskWrapper.mTaskPtr->Release();
 	return taskWrapper;
 }
 
-Task Task::ContinueWith(ThreadName name, std::function<TaskRoute>&& routine)
+Task Task::Then(ThreadName name, std::function<TaskRoute>&& route)
 {
 	if (mTaskPtr)
 	{
 		//程序启动时，为了防止运行到这一步之前，task完成之后就回收。
 		//默认 reference = 2; 在Task 构造函数内会有reference增加的操作
-		Task taskWrapper(mTaskPtr->ContinueWith(name, std::move(routine)));
+		Task taskWrapper(mTaskPtr->ContinueWith(name, std::move(route)));
 		//所以这里可以把构造时的第二个引用去掉了。
 		taskWrapper.mTaskPtr->Release();
 		return taskWrapper;
@@ -671,22 +679,66 @@ void TaskScheduler::Join()
 
 }
 
-bool TaskScheduler::TaskQueue::enqueue(GraphTask * pTask)
+TaskScheduler::TaskQueue::TaskQueue(unsigned int num) 
+	: queueH(num)
+	, queueN(num)
 {
-	if (queue.enqueue(pTask))
+}
+
+bool TaskScheduler::TaskQueue::enqueue(GraphTask* pTask)
+{
+	TaskPriority taskPriority = pTask->DesireExecutionPriority();
+	if (taskPriority == TaskPriority::High)
 	{
+		if (queueH.enqueue(pTask))
+		{
+			num_tasks.fetch_add(1, std::memory_order_release);
+			if (num_waiting_threads.load(std::memory_order_acquire))
+			{
+				std::unique_lock<std::mutex> lk(queue_mtx);
+				queue_cv.notify_one();
+			}
+			return true;
+		}
+		else
+		{
+			taskPriority = TaskPriority::Normal;
+		}
+	}
+
+	if (taskPriority == TaskPriority::Normal)
+	{
+		if (queueN.enqueue(pTask))
+		{
+			num_tasks.fetch_add(1, std::memory_order_release);
+			if (num_waiting_threads.load(std::memory_order_acquire))
+			{
+				std::unique_lock<std::mutex> lk(queue_mtx);
+				queue_cv.notify_one();
+			}
+			return true;
+		}
+		else
+		{
+			taskPriority = TaskPriority::Low;
+		}
+	}
+
+	if (taskPriority == TaskPriority::Low)
+	{
+		std::lock_guard<std::mutex> lk(queue_low_mtx);
+		queueL.push_back(pTask);
 		num_tasks.fetch_add(1, std::memory_order_release);
-		if(num_waiting_threads.load(std::memory_order_acquire))
+		if (num_waiting_threads.load(std::memory_order_acquire))
 		{
 			std::unique_lock<std::mutex> lk(queue_mtx);
 			queue_cv.notify_one();
 		}
 		return true;
 	}
-	else
-	{
-		return false;
-	}
+
+	assert(false);
+	return false;
 }
 
 void TaskScheduler::TaskQueue::quit()
@@ -707,10 +759,27 @@ bool TaskScheduler::TaskQueue::dequeue(GraphTask *& pTask)
 				num_tasks.load(std::memory_order_acquire) != 0;
 		});
 		num_waiting_threads.fetch_sub(1, std::memory_order_release);
-		if (queue.dequeue(pTask))
+
+		if (queueH.dequeue(pTask))
 		{
 			num_tasks.fetch_sub(1, std::memory_order_release);
 			return true;
+		}
+		else if(queueN.dequeue(pTask))
+		{
+			num_tasks.fetch_sub(1, std::memory_order_release);
+			return true;
+		}
+		else
+		{
+			std::lock_guard<std::mutex> lk(queue_low_mtx);
+			if (queueL.size() > 0)
+			{
+				pTask = queueL.back();
+				queueL.pop_back();
+				num_tasks.fetch_sub(1, std::memory_order_release);
+				return true;
+			}
 		}
 	}
 	return false;
